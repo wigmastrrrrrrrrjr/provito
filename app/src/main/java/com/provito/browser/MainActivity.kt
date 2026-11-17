@@ -28,6 +28,7 @@ import android.webkit.WebViewDatabase
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_SEARCH_ENGINE = "search_engine"          // brave | duckduckgo | mojeek
         const val KEY_BLOCK_ADS = "block_ads"
         const val KEY_UNLOAD_TABS = "unload_tabs"
+        const val KEY_AUTO_UI_RESIZE = "auto_ui_resize"
 
         // RAM budget for tabs: ~1 GB. Tabs beyond the budget are unloaded
         // (their WebView is destroyed; url + title are kept so they can be
@@ -89,6 +91,15 @@ class MainActivity : AppCompatActivity() {
     private var current: Tab? = null
     private val blockedTotal = java.util.concurrent.atomic.AtomicInteger(0)
 
+    // ---------- Responsive UI ----------
+    // The shell measures the window in dp and scales bars, text and touch
+    // targets so the UI stays proportional from phones up to tablets.
+    private var uiScale = 1f
+    private var insetTop = 0
+    private var insetBottom = 0
+    private var insetLeft = 0
+    private var insetRight = 0
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,6 +129,7 @@ class MainActivity : AppCompatActivity() {
 
         wireChrome()
         wireOmnibox()
+        setupResponsiveUi()
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -145,6 +157,96 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun getCurrentVersionName(): String = BuildConfig.VERSION_NAME
+
+    // ---------- Responsive UI engine ----------
+
+    /** Measures the window in dp and picks a scale tier for the shell. */
+    private fun applyResponsiveUi() {
+        val dm = resources.displayMetrics
+        val wm = getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+        val bounds = if (android.os.Build.VERSION.SDK_INT >= 30) {
+            wm.currentWindowMetrics.bounds
+        } else {
+            @Suppress("DEPRECATION")
+            android.graphics.Rect(0, 0, wm.defaultDisplay.width, wm.defaultDisplay.height)
+        }
+        val widthDp = bounds.width() / dm.density
+        val heightDp = bounds.height() / dm.density
+        val smallest = minOf(widthDp, heightDp)
+
+        val auto = prefs.getBoolean(KEY_AUTO_UI_RESIZE, true)
+        uiScale = when {
+            !auto -> 1f
+            smallest >= 840f -> 1.5f   // large tablets / desktop-ish
+            smallest >= 720f -> 1.35f  // tablets
+            smallest >= 600f -> 1.2f   // small tablets / large foldables
+            else -> 1f                 // phones
+        }
+        layoutShell()
+    }
+
+    /** Applies scale + system insets to the native shell. */
+    private fun layoutShell() {
+        val d = resources.displayMetrics.density
+        fun px(dp: Float) = (dp * uiScale * d).toInt()
+
+        val topBar = findViewById<LinearLayout>(R.id.topBar)
+        val bottomBar = findViewById<LinearLayout>(R.id.bottomBar)
+        val btnShield = findViewById<ImageButton>(R.id.btnShield)
+        val btnGo = findViewById<ImageButton>(R.id.btnGo)
+
+        topBar.layoutParams.height = px(56f) + insetTop
+        topBar.setPadding(px(8f) + insetLeft, insetTop, px(8f) + insetRight, 0)
+
+        btnShield.layoutParams.width = px(36f)
+        btnShield.layoutParams.height = px(36f)
+        btnGo.layoutParams.width = px(36f)
+        btnGo.layoutParams.height = px(36f)
+
+        omnibox.layoutParams.height = px(42f)
+        omnibox.textSize = 14f * uiScale
+        txtBlocked.textSize = 11f * uiScale
+        txtBlocked.minWidth = px(34f)
+
+        bottomBar.layoutParams.height = px(52f) + insetBottom
+        bottomBar.setPadding(insetLeft, 0, insetRight, insetBottom)
+
+        topBar.requestLayout()
+        bottomBar.requestLayout()
+    }
+
+    /** Keeps bars clear of status/nav bars, cutouts and the keyboard. */
+    private fun setupResponsiveUi() {
+        val types = androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+            androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+        val topBar = findViewById<LinearLayout>(R.id.topBar)
+        val bottomBar = findViewById<LinearLayout>(R.id.bottomBar)
+
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(topBar) { _, insets ->
+            val i = insets.getInsets(types)
+            insetTop = i.top
+            insetLeft = i.left
+            insetRight = i.right
+            layoutShell()
+            insets
+        }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(bottomBar) { _, insets ->
+            val i = insets.getInsets(
+                types or androidx.core.view.WindowInsetsCompat.Type.ime()
+            )
+            insetBottom = i.bottom
+            layoutShell()
+            insets
+        }
+        applyResponsiveUi()
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Fold/unfold, rotation, window resize (configChanges is declared in
+        // the manifest so the activity survives and just relayouts).
+        applyResponsiveUi()
+    }
 
     // ---------- Tabs and RAM management ----------
 
@@ -692,6 +794,7 @@ class MainActivity : AppCompatActivity() {
             KEY_SEARCH_ENGINE -> prefs.getString(KEY_SEARCH_ENGINE, "brave") ?: "brave"
             KEY_BLOCK_ADS -> prefs.getBoolean(KEY_BLOCK_ADS, true).toString()
             KEY_UNLOAD_TABS -> prefs.getBoolean(KEY_UNLOAD_TABS, true).toString()
+            KEY_AUTO_UI_RESIZE -> prefs.getBoolean(KEY_AUTO_UI_RESIZE, true).toString()
             KEY_WIPE_ON_EXIT -> prefs.getBoolean(KEY_WIPE_ON_EXIT, true).toString()
             KEY_AUTO_UPDATE -> prefs.getBoolean(KEY_AUTO_UPDATE, false).toString()
             Updater.PREF_UPDATE_CHECK -> prefs.getBoolean(Updater.PREF_UPDATE_CHECK, true).toString()
@@ -712,6 +815,11 @@ class MainActivity : AppCompatActivity() {
                     val b = value.toBooleanStrictOrNull() ?: return
                     e.putBoolean(KEY_UNLOAD_TABS, b)
                     if (b) runOnUiThread { enforceTabBudget() }
+                }
+                KEY_AUTO_UI_RESIZE -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(KEY_AUTO_UI_RESIZE, b)
+                    runOnUiThread { applyResponsiveUi() }
                 }
                 KEY_WIPE_ON_EXIT -> {
                     val b = value.toBooleanStrictOrNull() ?: return

@@ -105,6 +105,17 @@
     line-height: 1.6;
     text-align: center;
   }
+  @media (min-width: 720px) {
+    body { padding: 48px 32px 80px; max-width: 720px; }
+    h1 { font-size: 1.5rem; }
+    .sub { font-size: .85rem; }
+    .row { padding: 18px 22px; }
+    .row .name { font-size: 1rem; }
+    .row .desc { font-size: .78rem; }
+    select { font-size: .95rem; }
+    button.action { font-size: 1rem; padding: 16px 22px; }
+    .about { font-size: .8rem; }
+  }
 </style>
 </head>
 <body>
@@ -160,6 +171,13 @@
       </div>
       <label class="switch"><input type="checkbox" data-key="unload_tabs" checked><span class="track"></span></label>
     </div>
+    <div class="row">
+      <div class="info">
+        <div class="name">Auto UI resize</div>
+        <div class="desc">Detects your screen size and scales the interface to fit - bigger bars and touch targets on tablets and foldables, standard size on phones.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="auto_ui_resize" checked><span class="track"></span></label>
+    </div>
   </div>
 
   <div class="section-title">Updates</div>
@@ -214,6 +232,7 @@ engineSel.addEventListener('change', function() {
 
 bindSwitch('block_ads', Android.get('block_ads') !== 'false');
 bindSwitch('unload_tabs', Android.get('unload_tabs') !== 'false');
+bindSwitch('auto_ui_resize', Android.get('auto_ui_resize') !== 'false');
 bindSwitch('wipe_on_exit', Android.get('wipe_on_exit') !== 'false');
 bindSwitch('auto_update_blocklists', Android.get('auto_update_blocklists') === 'true');
 bindSwitch('update_check_enabled', Android.get('update_check_enabled') !== 'false');
