@@ -27,7 +27,7 @@ object Updater {
 
     const val REPO = "wigmastrrrrrrrrjr/provito"
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
-    private const val PREF_UPDATE_CHECK = "update_check_enabled"
+    const val PREF_UPDATE_CHECK = "update_check_enabled"
 
     private class ReleaseInfo(val version: String, val notes: String, val apkUrl: String)
 

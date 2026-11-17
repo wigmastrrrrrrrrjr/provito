@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import java.io.File
 import java.io.InputStream
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Provito's blocking engine.
@@ -19,38 +18,51 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - lines starting with "url:" are plain substring rules applied to the full URL
  *
  * Nothing is uploaded anywhere: all matching happens locally in this process.
+ * The list is parsed off the main thread so startup stays fast even with
+ * ~100k downloaded rules.
  */
 class Blocker(private val context: Context) {
 
-    private val blockedHosts = HashSet<String>(8192)
-    private val urlRules = ArrayList<String>()
+    @Volatile var enabled = true
+
     @Volatile private var ready = false
+    @Volatile private var blockedHosts: Set<String> = emptySet()
+    @Volatile private var urlRules: List<String> = emptyList()
 
     val hostCount: Int get() = blockedHosts.size
+    val isReady: Boolean get() = ready
+
+    /** Parse the blocklists on a background thread; ready flips when done. */
+    fun loadAsync() {
+        Thread { load() }.start()
+    }
 
     fun load() {
-        blockedHosts.clear()
-        urlRules.clear()
-        runCatching { parse(context.assets.open("blocklist.txt")) }
+        val hosts = HashSet<String>(8192)
+        val rules = ArrayList<String>()
+        runCatching { parse(context.assets.open("blocklist.txt"), hosts, rules) }
         runCatching {
             val f = File(context.filesDir, "blocklist_download.txt")
-            if (f.exists()) f.inputStream().use { parse(it) }
+            if (f.exists()) f.inputStream().use { parse(it, hosts, rules) }
         }
+        // Atomic swap - readers never see a half-built set.
+        urlRules = rules
+        blockedHosts = hosts
         ready = true
     }
 
-    private fun parse(input: InputStream) {
+    private fun parse(input: InputStream, hosts: MutableSet<String>, rules: MutableList<String>) {
         input.bufferedReader().useLines { lines ->
             for (raw in lines) {
                 val line = raw.trim()
                 if (line.isEmpty() || line.startsWith("#")) continue
                 if (line.startsWith("url:")) {
                     val rule = line.removePrefix("url:")
-                    if (rule.length > 4) urlRules.add(rule)
+                    if (rule.length > 4) rules.add(rule)
                     continue
                 }
                 val domain = extractDomain(line) ?: continue
-                if (domain.length >= 4 && '.' in domain) blockedHosts.add(domain)
+                if (domain.length >= 4 && '.' in domain) hosts.add(domain)
             }
         }
     }
@@ -68,7 +80,7 @@ class Blocker(private val context: Context) {
     }
 
     fun shouldBlock(urlString: String): Boolean {
-        if (!ready) return false
+        if (!enabled || !ready) return false
         if (urlString.startsWith("data:") ||
             urlString.startsWith("blob:") ||
             urlString.startsWith("about:")
@@ -84,8 +96,9 @@ class Blocker(private val context: Context) {
                 idx = host.indexOf('.', idx + 1)
             }
         }
-        if (urlRules.isNotEmpty()) {
-            for (rule in urlRules) if (rule in urlString) return true
+        val rules = urlRules
+        if (rules.isNotEmpty()) {
+            for (rule in rules) if (rule in urlString) return true
         }
         return false
     }

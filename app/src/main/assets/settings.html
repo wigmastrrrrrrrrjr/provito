@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Provito - Settings</title>
+<style>
+  :root {
+    --bg: #14141f;
+    --card: #1e1e2e;
+    --accent: #8e7bff;
+    --text: #eceaf8;
+    --muted: #8f8ca6;
+    --border: #2c2c45;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px 16px 60px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.15rem; margin-bottom: 2px; }
+  .sub { color: var(--muted); font-size: .72rem; margin-bottom: 20px; }
+  .section-title {
+    color: var(--accent);
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 22px 0 8px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .info { flex: 1; min-width: 0; }
+  .row .name { font-size: .9rem; font-weight: 600; }
+  .row .desc { color: var(--muted); font-size: .68rem; margin-top: 2px; line-height: 1.35; }
+  .switch {
+    position: relative;
+    width: 44px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute;
+    inset: 0;
+    background: #33334d;
+    border-radius: 13px;
+    transition: background .2s;
+    cursor: pointer;
+  }
+  .switch .track::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #cfcbe6;
+    transition: transform .2s, background .2s;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(18px); background: #17122e; }
+  select {
+    background: #26263f;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: .85rem;
+    outline: none;
+  }
+  button.action {
+    width: 100%;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px;
+    font-size: .9rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  button.action:last-child { border-bottom: none; }
+  button.action:active { background: #26263f; }
+  .about {
+    margin-top: 26px;
+    color: var(--muted);
+    font-size: .7rem;
+    line-height: 1.6;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <h1>Settings</h1>
+  <div class="sub" id="version">Provito</div>
+
+  <div class="section-title">Search engine</div>
+  <div class="card">
+    <div class="row">
+      <div class="info">
+        <div class="name">Default engine</div>
+        <div class="desc">Used when you type a search in the address bar. Brave is the privacy-first default.</div>
+      </div>
+      <select id="engine">
+        <option value="brave">Brave</option>
+        <option value="duckduckgo">DuckDuckGo</option>
+        <option value="mojeek">Mojeek</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="section-title">Privacy</div>
+  <div class="card">
+    <div class="row">
+      <div class="info">
+        <div class="name">Block ads and trackers</div>
+        <div class="desc">Local rule engine with open-source blocklists. Third-party cookies are always blocked, regardless of this setting.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="block_ads" checked><span class="track"></span></label>
+    </div>
+    <div class="row">
+      <div class="info">
+        <div class="name">Wipe data on exit</div>
+        <div class="desc">Clears cookies and caches when you leave the app. Logins are kept while you stay.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="wipe_on_exit" checked><span class="track"></span></label>
+    </div>
+    <div class="row">
+      <div class="info">
+        <div class="name">Auto-update blocklists</div>
+        <div class="desc">Anonymous download of the open-source StevenBlack list (~100k rules). Off by default so the app makes no calls you did not ask for.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="auto_update_blocklists"><span class="track"></span></label>
+    </div>
+  </div>
+
+  <div class="section-title">Performance</div>
+  <div class="card">
+    <div class="row">
+      <div class="info">
+        <div class="name">Unload inactive tabs</div>
+        <div class="desc">Keeps total tab memory around 1 GB. Older tabs go to standby (url + title kept) and reopen instantly when tapped. Turn off to keep every tab fully loaded.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="unload_tabs" checked><span class="track"></span></label>
+    </div>
+  </div>
+
+  <div class="section-title">Updates</div>
+  <div class="card">
+    <div class="row">
+      <div class="info">
+        <div class="name">Auto-check for updates</div>
+        <div class="desc">Anonymous check of GitHub Releases on launch. You always choose whether to install.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="update_check_enabled" checked><span class="track"></span></label>
+    </div>
+    <button class="action" onclick="Android.checkUpdatesNow(); return false;">Check for updates now</button>
+    <button class="action" onclick="Android.updateBlocklists(); return false;">Update blocklists now</button>
+  </div>
+
+  <div class="section-title">Data</div>
+  <div class="card">
+    <button class="action" onclick="Android.clearBrowsingData(); return false;">Clear browsing data</button>
+  </div>
+
+  <div class="about">
+    Provito v<span id="ver"></span><br>
+    Blocked this session: <span id="blocked">0</span> - rules loaded: <span id="rules">0</span><br>
+    No accounts. No history. No telemetry. Honestly vibecoded.
+  </div>
+
+<script>
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function bindSwitch(key, value) {
+  var el = document.querySelector('input[data-key="' + key + '"]');
+  if (el) el.checked = value;
+}
+
+document.querySelectorAll('input[data-key]').forEach(function(input) {
+  input.addEventListener('change', function() {
+    Android.set(input.dataset.key, String(input.checked));
+    Android.toast('Saved');
+  });
+});
+
+var engineSel = document.getElementById('engine');
+engineSel.value = Android.get('search_engine') || 'brave';
+engineSel.addEventListener('change', function() {
+  Android.set('search_engine', engineSel.value);
+  Android.toast('Search engine saved');
+});
+
+bindSwitch('block_ads', Android.get('block_ads') !== 'false');
+bindSwitch('unload_tabs', Android.get('unload_tabs') !== 'false');
+bindSwitch('wipe_on_exit', Android.get('wipe_on_exit') !== 'false');
+bindSwitch('auto_update_blocklists', Android.get('auto_update_blocklists') === 'true');
+bindSwitch('update_check_enabled', Android.get('update_check_enabled') !== 'false');
+
+var v = Android.version();
+document.getElementById('version').textContent = 'Provito v' + v;
+document.getElementById('ver').textContent = v;
+document.getElementById('blocked').textContent = Android.blockedCount();
+document.getElementById('rules').textContent = Android.ruleCount();
+</script>
+</body>
+</html>

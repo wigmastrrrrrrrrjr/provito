@@ -7,6 +7,9 @@
         android:id="@+id/action_close_tab"
         android:title="Close current tab" />
     <item
+        android:id="@+id/action_settings"
+        android:title="Settings" />
+    <item
         android:id="@+id/action_clear_data"
         android:title="Clear browsing data" />
     <item

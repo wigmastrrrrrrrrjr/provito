@@ -7,12 +7,15 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -25,7 +28,6 @@ import android.webkit.WebViewDatabase
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
-import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
@@ -39,9 +41,21 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         const val HOME_URL = "file:///android_asset/home.html"
+        const val TABS_PAGE = "file:///android_asset/tabs.html"
+        const val SETTINGS_PAGE = "file:///android_asset/settings.html"
         const val PREFS = "provito_prefs"
-        const val KEY_AUTO_UPDATE = "auto_update_blocklists"
+
+        const val KEY_AUTO_UPDATE = "auto_update_blocklists"   // blocklist downloads
         const val KEY_WIPE_ON_EXIT = "wipe_on_exit"
+        const val KEY_SEARCH_ENGINE = "search_engine"          // brave | duckduckgo | mojeek
+        const val KEY_BLOCK_ADS = "block_ads"
+        const val KEY_UNLOAD_TABS = "unload_tabs"
+
+        // RAM budget for tabs: ~1 GB. Tabs beyond the budget are unloaded
+        // (their WebView is destroyed; url + title are kept so they can be
+        // reopened instantly). Estimated at ~30 MB per loaded tab.
+        const val RAM_BUDGET_MB = 1024
+        const val MB_PER_TAB = 30
 
         // Generic user agent: no device model, no app fingerprints.
         const val USER_AGENT =
@@ -58,14 +72,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnBack: ImageButton
     private lateinit var btnForward: ImageButton
 
-    private class Tab(val webView: WebView) {
-        var ready = false
+    private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** A browser tab. When [webView] is null the tab is unloaded and only
+     *  its url/title (a few bytes) stay in RAM so it can be reopened. */
+    inner class Tab(var url: String) {
+        var webView: WebView? = null
+        var title: String = "New tab"
+        var lastUsed: Long = System.currentTimeMillis()
+        val isActive: Boolean get() = webView != null
+        val isOverlay: Boolean get() = url == TABS_PAGE || url == SETTINGS_PAGE
     }
 
     private val tabs = ArrayList<Tab>()
     private var current: Tab? = null
     private val blockedTotal = java.util.concurrent.atomic.AtomicInteger(0)
-    private var tabsSheetShowing = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,7 +96,9 @@ class MainActivity : AppCompatActivity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         blocker = Blocker(this)
-        blocker.load()
+        blocker.enabled = prefs.getBoolean(KEY_BLOCK_ADS, true)
+        // Parse blocklists off the main thread so the shell paints immediately.
+        blocker.loadAsync()
 
         setContentView(R.layout.activity_main)
         webContainer = findViewById(R.id.webContainer)
@@ -84,12 +108,13 @@ class MainActivity : AppCompatActivity() {
         btnBack = findViewById(R.id.btnBack)
         btnForward = findViewById(R.id.btnForward)
 
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // Warm up the cookie store off the main thread (it is a costly
+        // synchronous init that otherwise lands on startup).
+        Thread { CookieManager.getInstance().setAcceptCookie(true) }.start()
+
         if (prefs.getBoolean(KEY_AUTO_UPDATE, false) && !blockerHostsFileExists()) {
             Thread { if (blocker.downloadUpdatedList()) runOnUiThread { refreshShieldBadge() } }.start()
         }
-
-        Updater.maybeCheck(this, automatic = true)
 
         wireChrome()
         wireOmnibox()
@@ -97,32 +122,46 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(
             this,
             object : androidx.activity.OnBackPressedCallback(true) {
-                override fun handleOnBackPressed() {
-                    handleBack()
-                }
+                override fun handleOnBackPressed() = handleBack()
             }
         )
 
-        val incoming = intent?.dataString
-        if (incoming != null) {
-            newTab().webView.loadUrl(incoming)
-        } else {
-            newTab().webView.loadUrl(HOME_URL)
+        // Defer WebView creation until after the first frame - the native
+        // shell (omnibox + toolbar) is visible instantly.
+        mainHandler.post {
+            val incoming = intent?.dataString
+            if (incoming != null) {
+                newTab(incoming)
+            } else {
+                newTab(HOME_URL)
+            }
+            Updater.maybeCheck(this, automatic = true)
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.dataString?.let { url ->
-            val tab = if (current?.ready == true) current else newTab()
-            tab?.webView?.loadUrl(url)
-        }
+        intent.dataString?.let { url -> mainHandler.post { newTab(url) } }
     }
 
-    // ---------- WebView creation, hardened for privacy ----------
+    fun getCurrentVersionName(): String = BuildConfig.VERSION_NAME
 
+    // ---------- Tabs and RAM management ----------
+
+    private fun newTab(url: String = HOME_URL): Tab {
+        val tab = Tab(url)
+        synchronized(tabs) { tabs.add(tab) }
+        tab.lastUsed = System.currentTimeMillis()
+        ensureLoaded(tab)
+        enforceTabBudget()
+        switchTo(tab)
+        return tab
+    }
+
+    /** Creates (or recreates) the WebView backing a tab. */
     @SuppressLint("SetJavaScriptEnabled")
-    private fun newTab(): Tab {
+    private fun ensureLoaded(tab: Tab) {
+        if (tab.webView != null) return
         val wv = WebView(this)
         wv.layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -137,7 +176,9 @@ class MainActivity : AppCompatActivity() {
         s.mediaPlaybackRequiresUserGesture = true
         s.allowFileAccess = false
         s.allowContentAccess = false
-        s.cacheMode = WebSettings.LOAD_NO_CACHE
+        // Cached loads are dramatically faster on revisit; the cache is
+        // wiped on exit (see wipeBrowsingData) so nothing lingers.
+        s.cacheMode = WebSettings.LOAD_DEFAULT
         s.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         s.saveFormData = false
         @Suppress("DEPRECATION")
@@ -147,7 +188,7 @@ class MainActivity : AppCompatActivity() {
         // No third-party cookies, ever.
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, false)
 
-        wv.setDownloadListener { url, _, disposition, mimeType, _ ->
+        wv.setDownloadListener { url, _, _, _, _ ->
             try {
                 val req = DownloadManager.Request(Uri.parse(url))
                     .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -162,11 +203,112 @@ class MainActivity : AppCompatActivity() {
         wv.webViewClient = PrivacyWebViewClient()
         wv.webChromeClient = PrivacyChromeClient(wv)
 
-        val tab = Tab(wv)
-        synchronized(tabs) { tabs.add(tab) }
-        switchTo(tab)
-        return tab
+        // JS bridges only on Provito's own chrome pages - never exposed to
+        // websites.
+        if (tab.isOverlay) {
+            wv.addJavascriptInterface(SettingsBridge(), "ProvitoSettings")
+            wv.addJavascriptInterface(TabsBridge(), "ProvitoTabs")
+        }
+
+        wv.loadUrl(tab.url)
+        tab.webView = wv
     }
+
+    /** Estimated total tab RAM: ~30 MB per loaded tab, budget ~1 GB. */
+    private fun activeTabCount(): Int = synchronized(tabs) { tabs.count { it.isActive } }
+
+    private fun enforceTabBudget() {
+        if (!prefs.getBoolean(KEY_UNLOAD_TABS, true)) return
+        val budgetTabs = RAM_BUDGET_MB / MB_PER_TAB
+        while (activeTabCount() > budgetTabs) {
+            val victim = synchronized(tabs) {
+                tabs
+                    .filter { it.isActive && it !== current && !it.isOverlay }
+                    .minByOrNull { it.lastUsed }
+            } ?: break
+            unloadTab(victim)
+        }
+    }
+
+    private fun unloadTab(tab: Tab) {
+        val wv = tab.webView ?: return
+        tab.url = wv.url ?: tab.url
+        tab.title = wv.title?.takeIf { it.isNotBlank() } ?: tab.title
+        tab.webView = null
+        synchronized(tabs) { if (!tabs.contains(tab)) tabs.add(tab) }
+        try {
+            wv.stopLoading()
+            wv.onPause()
+            wv.removeAllViews()
+            wv.destroy()
+        } catch (_: Exception) {
+            // already torn down
+        }
+    }
+
+    private fun switchTo(tab: Tab) {
+        current = tab
+        ensureLoaded(tab)
+        tab.lastUsed = System.currentTimeMillis()
+        val wv = tab.webView
+        if (wv != null) {
+            wv.onResume()
+            webContainer.removeAllViews()
+            webContainer.addView(wv)
+        }
+        omnibox.setText(tab.url)
+        omnibox.clearFocus()
+        enforceTabBudget()
+        updateNavButtons()
+    }
+
+    private fun closeTab(tab: Tab) {
+        synchronized(tabs) { tabs.remove(tab) }
+        tab.webView?.let { wv ->
+            try {
+                wv.stopLoading()
+                wv.onPause()
+                wv.clearHistory()
+                wv.clearCache(true)
+                wv.clearSslPreferences()
+                wv.removeAllViews()
+                wv.destroy()
+            } catch (_: Exception) {
+                // already torn down
+            }
+        }
+        tab.webView = null
+        if (current === tab) {
+            current = null
+            val next = synchronized(tabs) { tabs.lastOrNull() }
+            if (next != null) switchTo(next) else {
+                webContainer.removeAllViews()
+                newTab(HOME_URL)
+            }
+        }
+    }
+
+    private fun updateNavButtons() {
+        val tab = current
+        btnBack.alpha = if (tab?.webView?.canGoBack() == true) 1f else 0.35f
+        btnForward.alpha = if (tab?.webView?.canGoForward() == true) 1f else 0.35f
+    }
+
+    private fun handleBack() {
+        val tab = current ?: run { finish(); return }
+        val wv = tab.webView
+        if (wv != null && wv.canGoBack()) {
+            wv.goBack()
+        } else if (tab.isOverlay) {
+            closeTab(tab)
+        } else if (tabs.size > 1) {
+            closeTab(tab)
+        } else {
+            moveTaskToBack(true)
+        }
+    }
+
+    // ---------- WebView clients, hardened for privacy ----------
 
     private inner class PrivacyWebViewClient : WebViewClient() {
 
@@ -190,7 +332,15 @@ class MainActivity : AppCompatActivity() {
         ): Boolean {
             val url = request.url
             val scheme = url.scheme ?: return false
-            if (scheme == "http" || scheme == "https") return false
+            if (scheme == "http" || scheme == "https") {
+                // Provito chrome pages never navigate in place: links open
+                // in a fresh (bridge-free) tab instead.
+                if ((view.url ?: "").startsWith("file:///android_asset/")) {
+                    runOnUiThread { newTab(url.toString()) }
+                    return true
+                }
+                return false
+            }
             // Non-web scheme (mailto:, tel:, app links...) -> hand to the system.
             return try {
                 startActivity(
@@ -204,9 +354,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
             super.onPageStarted(view, url, favicon)
-            if (view == current?.webView && !url.startsWith(HOME_URL)) {
-                omnibox.setText(url)
-            }
+            if (view == current?.webView) omnibox.setText(url)
             progress.show()
             progress.setIndeterminate(true)
             updateNavButtons()
@@ -214,6 +362,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
+            current?.title = view.title?.takeIf { it.isNotBlank() } ?: current?.title ?: "New tab"
             if (view == current?.webView) {
                 omnibox.setText(url)
                 view.requestFocus()
@@ -249,8 +398,7 @@ class MainActivity : AppCompatActivity() {
                     request: WebResourceRequest
                 ): Boolean {
                     runOnUiThread {
-                        val tab = newTab()
-                        tab.webView.loadUrl(request.url.toString())
+                        newTab(request.url.toString())
                     }
                     return true
                 }
@@ -268,12 +416,6 @@ class MainActivity : AppCompatActivity() {
                 progress.setProgressCompat(newProgress, true)
             } else {
                 progress.hide()
-            }
-        }
-
-        override fun onReceivedTitle(view: WebView, title: String) {
-            if (view == current?.webView && !view.url.isNullOrEmpty()) {
-                // keep full URL in omnibox; title not stored anywhere
             }
         }
 
@@ -334,13 +476,30 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageButton>(R.id.btnRefresh).setOnClickListener {
             current?.webView?.reload()
         }
-        findViewById<ImageButton>(R.id.btnTabs).setOnClickListener { showTabsSheet() }
+        findViewById<ImageButton>(R.id.btnTabs).setOnClickListener { openTabsPage() }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu(it as ImageButton) }
+    }
+
+    private fun openTabsPage() {
+        // If we are already on the tabs page just refresh it.
+        if (current?.url == TABS_PAGE) {
+            current?.webView?.reload()
+            return
+        }
+        newTab(TABS_PAGE)
+    }
+
+    private fun openSettingsPage() {
+        if (current?.url == SETTINGS_PAGE) {
+            current?.webView?.reload()
+            return
+        }
+        newTab(SETTINGS_PAGE)
     }
 
     private fun wireOmnibox() {
         omnibox.setOnFocusChangeListener { _, focused ->
-            if (!focused) current?.webView?.url?.let { omnibox.setText(it) }
+            if (!focused) current?.url?.let { omnibox.setText(it) }
             else omnibox.post { omnibox.selectAll() }
         }
         omnibox.setOnEditorActionListener { _, actionId, _ ->
@@ -356,20 +515,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun searchEngineUrl(query: String): String = when (
+        prefs.getString(KEY_SEARCH_ENGINE, "brave")
+    ) {
+        "duckduckgo" -> "https://duckduckgo.com/?q=" + URLEncoder.encode(query, "UTF-8")
+        "mojeek" -> "https://www.mojeek.com/search?q=" + URLEncoder.encode(query, "UTF-8")
+        else -> "https://search.brave.com/search?q=" + URLEncoder.encode(query, "UTF-8")
+    }
+
     private fun navigate(input: String) {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return
         val url = when {
             trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
             trimmed.startsWith("about:") || trimmed.startsWith("file://") -> trimmed
-            trimmed.contains(' ') -> braveSearchUrl(trimmed)
+            trimmed == "provito://settings" -> SETTINGS_PAGE
+            trimmed == "provito://tabs" -> TABS_PAGE
+            trimmed.contains(' ') -> searchEngineUrl(trimmed)
             looksLikeUrl(trimmed) -> "https://$trimmed"
-            else -> braveSearchUrl(trimmed)
+            else -> searchEngineUrl(trimmed)
         }
         hideKeyboard()
         omnibox.clearFocus()
-        val tab = current ?: newTab()
-        tab.webView.loadUrl(url)
+        (current ?: newTab(HOME_URL)).webView?.loadUrl(url)
     }
 
     private fun looksLikeUrl(s: String): Boolean {
@@ -379,141 +547,9 @@ class MainActivity : AppCompatActivity() {
         return host.all { it.isLetterOrDigit() || it in ".-:[]_" }
     }
 
-    private fun braveSearchUrl(query: String): String =
-        "https://search.brave.com/search?q=" + URLEncoder.encode(query, "UTF-8")
-
     private fun hideKeyboard() {
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         imm.hideSoftInputFromWindow(omnibox.windowToken, 0)
-    }
-
-    private fun switchTo(tab: Tab) {
-        current = tab
-        webContainer.removeAllViews()
-        webContainer.addView(tab.webView)
-        omnibox.setText(tab.webView.url ?: HOME_URL)
-        omnibox.clearFocus()
-        updateNavButtons()
-    }
-
-    private fun updateNavButtons() {
-        val tab = current
-        btnBack.alpha = if (tab?.webView?.canGoBack() == true) 1f else 0.35f
-        btnForward.alpha = if (tab?.webView?.canGoForward() == true) 1f else 0.35f
-    }
-
-    private fun handleBack() {
-        if (tabsSheetShowing) {
-            tabsSheetShowing = false
-            return
-        }
-        val tab = current ?: run { finish(); return }
-        if (tab.webView.canGoBack()) {
-            tab.webView.goBack()
-        } else if (tabs.size > 1) {
-            closeTab(tab)
-        } else {
-            moveTaskToBack(true)
-        }
-    }
-
-    // ---------- Tabs ----------
-
-    private fun showTabsSheet() {
-        tabsSheetShowing = true
-        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
-        dialog.setOnDismissListener { tabsSheetShowing = false }
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(48, 48, 48, 64)
-        }
-
-        synchronized(tabs) {
-            for (tab in tabs.toList()) {
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    background = resources.getDrawable(R.drawable.bg_omnibox, theme)
-                    setPadding(40, 32, 24, 32)
-                }
-                val lp = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = 24 }
-                row.layoutParams = lp
-
-                val text = TextView(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-                    )
-                    textSize = 14f
-                    maxLines = 2
-                    text = (tab.webView.title?.takeIf { it.isNotBlank() && tab.ready }
-                        ?: tab.webView.url ?: "New tab")
-                }
-                row.addView(text)
-
-                val close = ImageButton(this).apply {
-                    setImageResource(R.drawable.ic_close)
-                    background = null
-                    setOnClickListener {
-                        closeTab(tab)
-                        dialog.dismiss()
-                        if (tabs.isEmpty()) finish()
-                    }
-                }
-                row.addView(
-                    close,
-                    LinearLayout.LayoutParams(96, LinearLayout.LayoutParams.WRAP_CONTENT)
-                )
-
-                row.setOnClickListener {
-                    switchTo(tab)
-                    dialog.dismiss()
-                }
-                container.addView(row)
-            }
-        }
-
-        val add = TextView(this).apply {
-            text = "New tab"
-            textSize = 15f
-            setTextColor(resources.getColor(com.google.android.material.R.color.design_default_color_primary, theme))
-            setOnClickListener {
-                dialog.dismiss()
-                newTab().webView.loadUrl(HOME_URL)
-            }
-        }
-        container.addView(
-            add,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 16; gravity = android.view.Gravity.CENTER_HORIZONTAL }
-        )
-
-        dialog.setContentView(container)
-        dialog.show()
-    }
-
-    private fun closeTab(tab: Tab) {
-        synchronized(tabs) {
-            tabs.remove(tab)
-            tab.webView.apply {
-                loadUrl("about:blank")
-                onPause()
-                clearHistory()
-                clearCache(true)
-                clearSslPreferences()
-                destroy()
-            }
-        }
-        if (current === tab) {
-            current = null
-            val next = tabs.lastOrNull()
-            if (next != null) switchTo(next) else webContainer.removeAllViews()
-        }
     }
 
     // ---------- Menu, privacy actions ----------
@@ -521,7 +557,6 @@ class MainActivity : AppCompatActivity() {
     private fun showMenu(anchor: ImageButton) {
         val menu = PopupMenu(this, anchor)
         menu.menuInflater.inflate(R.menu.main_menu, menu.menu)
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         menu.menu.findItem(R.id.action_auto_update).isChecked =
             prefs.getBoolean(KEY_AUTO_UPDATE, false)
         menu.menu.findItem(R.id.action_wipe_on_exit).isChecked =
@@ -531,14 +566,17 @@ class MainActivity : AppCompatActivity() {
         menu.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 R.id.action_new_tab -> {
-                    newTab().webView.loadUrl(HOME_URL)
+                    newTab(HOME_URL)
                     true
                 }
                 R.id.action_close_tab -> {
                     current?.let {
                         closeTab(it)
-                        if (tabs.isEmpty()) finish()
                     }
+                    true
+                }
+                R.id.action_settings -> {
+                    openSettingsPage()
                     true
                 }
                 R.id.action_clear_data -> {
@@ -585,11 +623,11 @@ class MainActivity : AppCompatActivity() {
                     AlertDialog.Builder(this)
                         .setTitle("Provito")
                         .setMessage(
-                            "Private browser v1.0\n\n" +
+                            "Private browser v${BuildConfig.VERSION_NAME}\n\n" +
                                 "Default search: Brave\n" +
-                                "Blocking: local rule engine + open-source lists " +
-                                "(bundled list, StevenBlack/hosts optional)\n\n" +
-                                "No accounts, no history, no telemetry, no third-party cookies."
+                                "Blocking: local rule engine + open-source lists\n\n" +
+                                "No accounts, no history, no telemetry, no third-party cookies.\n" +
+                                "Honestly vibecoded - see the README."
                         )
                         .setPositiveButton("OK", null)
                         .show()
@@ -612,7 +650,7 @@ class MainActivity : AppCompatActivity() {
                     "- Third-party cookies blocked\n" +
                     "- Geolocation, camera and microphone denied\n" +
                     "- Popups and silent window opens blocked\n" +
-                    "- No cache, no passwords, no form data saved\n" +
+                    "- No passwords, no form data saved\n" +
                     "- Generic user agent, no device fingerprint"
             )
             .setPositiveButton("OK", null)
@@ -624,9 +662,6 @@ class MainActivity : AppCompatActivity() {
             if (it > 999) "${it / 1000}k" else it.toString()
         }
     }
-
-    fun getCurrentVersionName(): String =
-        com.provito.browser.BuildConfig.VERSION_NAME
 
     private fun blockerHostsFileExists(): Boolean =
         java.io.File(filesDir, "blocklist_download.txt").exists()
@@ -640,16 +675,166 @@ class MainActivity : AppCompatActivity() {
         WebViewDatabase.getInstance(this).clearHttpAuthUsernamePassword()
         synchronized(tabs) {
             for (tab in tabs) {
-                tab.webView.clearHistory()
-                tab.webView.clearSslPreferences()
-                tab.webView.clearCache(true)
+                tab.webView?.clearHistory()
+                tab.webView?.clearSslPreferences()
+                tab.webView?.clearCache(true)
+            }
+        }
+    }
+
+    // ---------- HTML chrome-page bridges ----------
+    // These interfaces are attached ONLY to Provito's own asset pages
+    // (tabs.html / settings.html), never to websites.
+
+    inner class SettingsBridge {
+        @JavascriptInterface
+        fun get(key: String): String = when (key) {
+            KEY_SEARCH_ENGINE -> prefs.getString(KEY_SEARCH_ENGINE, "brave") ?: "brave"
+            KEY_BLOCK_ADS -> prefs.getBoolean(KEY_BLOCK_ADS, true).toString()
+            KEY_UNLOAD_TABS -> prefs.getBoolean(KEY_UNLOAD_TABS, true).toString()
+            KEY_WIPE_ON_EXIT -> prefs.getBoolean(KEY_WIPE_ON_EXIT, true).toString()
+            KEY_AUTO_UPDATE -> prefs.getBoolean(KEY_AUTO_UPDATE, false).toString()
+            Updater.PREF_UPDATE_CHECK -> prefs.getBoolean(Updater.PREF_UPDATE_CHECK, true).toString()
+            else -> ""
+        }
+
+        @JavascriptInterface
+        fun set(key: String, value: String) {
+            val e = prefs.edit()
+            when (key) {
+                KEY_SEARCH_ENGINE -> e.putString(KEY_SEARCH_ENGINE, value)
+                KEY_BLOCK_ADS -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(KEY_BLOCK_ADS, b)
+                    blocker.enabled = b
+                }
+                KEY_UNLOAD_TABS -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(KEY_UNLOAD_TABS, b)
+                    if (b) runOnUiThread { enforceTabBudget() }
+                }
+                KEY_WIPE_ON_EXIT -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(KEY_WIPE_ON_EXIT, b)
+                }
+                KEY_AUTO_UPDATE -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(KEY_AUTO_UPDATE, b)
+                }
+                Updater.PREF_UPDATE_CHECK -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(Updater.PREF_UPDATE_CHECK, b)
+                }
+                else -> return
+            }
+            e.apply()
+        }
+
+        @JavascriptInterface
+        fun version(): String = BuildConfig.VERSION_NAME
+
+        @JavascriptInterface
+        fun blockedCount(): Int = blockedTotal.get()
+
+        @JavascriptInterface
+        fun ruleCount(): Int = blocker.hostCount
+
+        @JavascriptInterface
+        fun toast(message: String) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        @JavascriptInterface
+        fun checkUpdatesNow() {
+            runOnUiThread { Updater.maybeCheck(this@MainActivity, automatic = false) }
+        }
+
+        @JavascriptInterface
+        fun updateBlocklists() {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Updating blocklists...", Toast.LENGTH_SHORT).show()
+            }
+            Thread {
+                val ok = blocker.downloadUpdatedList()
+                runOnUiThread {
+                    refreshShieldBadge()
+                    toast(
+                        if (ok) "Blocklists updated (${blocker.hostCount} rules)"
+                        else "Update failed - check connection"
+                    )
+                }
+            }.start()
+        }
+
+        @JavascriptInterface
+        fun clearBrowsingData() {
+            runOnUiThread {
+                wipeBrowsingData()
+                toast("Browsing data cleared")
+            }
+        }
+
+        @JavascriptInterface
+        fun closePage() {
+            runOnUiThread {
+                current?.let { closeTab(it) }
+            }
+        }
+    }
+
+    inner class TabsBridge {
+        private fun esc(s: String): String =
+            s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+        @JavascriptInterface
+        fun getTabs(): String = synchronized(tabs) {
+            val sb = StringBuilder("[")
+            for ((i, tab) in tabs.withIndex()) {
+                val wv = tab.webView
+                val title = wv?.title?.takeIf { it.isNotBlank() }
+                    ?: tab.title.ifBlank { "New tab" }
+                val url = wv?.url ?: tab.url
+                sb.append("{\"id\":").append(i)
+                    .append(",\"title\":\"").append(esc(title))
+                    .append("\",\"url\":\"").append(esc(url))
+                    .append("\",\"unloaded\":").append(wv == null)
+                    .append(",\"current\":").append(tab === current)
+                    .append('}')
+                if (i != tabs.size - 1) sb.append(',')
+            }
+            sb.append(']').toString()
+        }
+
+        @JavascriptInterface
+        fun select(id: Int) {
+            runOnUiThread {
+                val target = synchronized(tabs) { tabs.getOrNull(id) } ?: return@runOnUiThread
+                val overlay = current
+                if (overlay != null && overlay.isOverlay) closeTab(overlay)
+                switchTo(target)
+            }
+        }
+
+        @JavascriptInterface
+        fun close(id: Int) {
+            runOnUiThread {
+                synchronized(tabs) { tabs.getOrNull(id) }?.let { closeTab(it) }
+            }
+        }
+
+        @JavascriptInterface
+        fun newTabFromUi() {
+            runOnUiThread {
+                current?.takeIf { it.isOverlay }?.let { closeTab(it) }
+                newTab(HOME_URL)
             }
         }
     }
 
     override fun onDestroy() {
-        val wipe = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_WIPE_ON_EXIT, true)
+        val wipe = prefs.getBoolean(KEY_WIPE_ON_EXIT, true)
         if (wipe) {
             CookieManager.getInstance().apply {
                 removeAllCookies(null)
@@ -658,7 +843,8 @@ class MainActivity : AppCompatActivity() {
         }
         synchronized(tabs) {
             for (tab in tabs.toList()) {
-                tab.webView.destroy()
+                tab.webView?.destroy()
+                tab.webView = null
             }
             tabs.clear()
         }
