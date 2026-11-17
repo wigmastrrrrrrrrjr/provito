@@ -18,14 +18,37 @@ android {
         }
     }
 
+    signingConfigs {
+        create("provito") {
+            val b64 = System.getenv("PROVITO_KEYSTORE_B64")
+            if (b64 != null) {
+                val keystoreFile = File(buildDir, "provito.keystore")
+                java.util.Base64.getDecoder().decode(b64).let {
+                    keystoreFile.parentFile.mkdirs()
+                    keystoreFile.writeBytes(it)
+                }
+                storeFile = keystoreFile
+                storePassword = System.getenv("PROVITO_STORE_PASS")
+                keyAlias = System.getenv("PROVITO_KEY_ALIAS")
+                keyPassword = System.getenv("PROVITO_KEY_PASS")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            val signed = System.getenv("PROVITO_KEYSTORE_B64") != null
+            if (signed) {
+                signingConfig = signingConfigs.getByName("provito")
+            }
+            isMinifyEnabled = signed
+            isShrinkResources = signed
+            if (signed) {
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                )
+            }
         }
     }
 

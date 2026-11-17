@@ -70,6 +70,12 @@ git push origin v1.0.1
 The workflow builds the APK with the tag as the version and publishes a
 GitHub release. The app then auto-detects it on next launch.
 
+APKs are signed with a persistent release key stored as repo secrets
+(`PROVITO_KEYSTORE_B64` etc.) so Android accepts in-place updates between
+releases. Note: pre-v1.1.0 builds were debug-signed by throwaway CI
+keystores; you need to uninstall once if you installed one of those, after
+which every future release updates cleanly.
+
 ## Honest disclosure
 
 This app is **vibecoded**. It was built end-to-end with an AI coding agent

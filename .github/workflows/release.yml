@@ -26,11 +26,16 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Build APK
+      - name: Build signed APK
+        env:
+          PROVITO_KEYSTORE_B64: ${{ secrets.PROVITO_KEYSTORE_B64 }}
+          PROVITO_STORE_PASS: ${{ secrets.PROVITO_STORE_PASS }}
+          PROVITO_KEY_ALIAS: ${{ secrets.PROVITO_KEY_ALIAS }}
+          PROVITO_KEY_PASS: ${{ secrets.PROVITO_KEY_PASS }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          gradle assembleDebug -PPROVITO_VERSION_NAME="$VERSION" --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk "Provito-${VERSION}.apk"
+          gradle assembleRelease -PPROVITO_VERSION_NAME="$VERSION" --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "Provito-${VERSION}.apk"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Create GitHub release
