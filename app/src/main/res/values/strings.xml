@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Provito</string>
+    <string name="omnibox_hint">Search privately with Brave</string>
+    <string name="blocked_description">Trackers and ads blocked</string>
+</resources>
