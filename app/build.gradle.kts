@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -22,11 +24,9 @@ android {
         create("provito") {
             val b64 = System.getenv("PROVITO_KEYSTORE_B64")
             if (b64 != null) {
-                val keystoreFile = File(buildDir, "provito.keystore")
-                java.util.Base64.getDecoder().decode(b64).let {
-                    keystoreFile.parentFile.mkdirs()
-                    keystoreFile.writeBytes(it)
-                }
+                val keystoreFile = layout.buildDirectory.get().asFile.resolve("provito.keystore")
+                keystoreFile.parentFile.mkdirs()
+                keystoreFile.writeBytes(Base64.getDecoder().decode(b64))
                 storeFile = keystoreFile
                 storePassword = System.getenv("PROVITO_STORE_PASS")
                 keyAlias = System.getenv("PROVITO_KEY_ALIAS")
