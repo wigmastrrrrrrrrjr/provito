@@ -160,6 +160,19 @@
       </div>
       <label class="switch"><input type="checkbox" data-key="auto_update_blocklists"><span class="track"></span></label>
     </div>
+    <div class="row">
+      <div class="info">
+        <div class="name" id="onion_name">Onion mode (route via Tor)</div>
+        <div class="desc" id="onion_desc">Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app. Sites see a Tor exit IP, never yours.</div>
+      </div>
+      <label class="switch"><input type="checkbox" data-key="onion_mode"><span class="track"></span></label>
+    </div>
+  </div>
+
+  <div class="section-title">Tor</div>
+  <div class="card">
+    <button class="action" onclick="Android.openOrbot(); return false;">Get Orbot (free, open source)</button>
+    <button class="action" onclick="Android.toast('Orbot check: ' + (Android.orbotRunning() ? 'running' : (Android.orbotInstalled() ? 'installed but not started' : 'not installed'))); return false;">Check Orbot status</button>
   </div>
 
   <div class="section-title">Performance</div>
@@ -235,7 +248,24 @@ bindSwitch('unload_tabs', Android.get('unload_tabs') !== 'false');
 bindSwitch('auto_ui_resize', Android.get('auto_ui_resize') !== 'false');
 bindSwitch('wipe_on_exit', Android.get('wipe_on_exit') !== 'false');
 bindSwitch('auto_update_blocklists', Android.get('auto_update_blocklists') === 'true');
+bindSwitch('onion_mode', Android.get('onion_mode') === 'true');
 bindSwitch('update_check_enabled', Android.get('update_check_enabled') !== 'false');
+
+function onionStatusText() {
+  var name = document.getElementById('onion_name');
+  var desc = document.getElementById('onion_desc');
+  if (Android.orbotRunning()) {
+    name.textContent = 'Onion mode (Tor connected)';
+    desc.textContent = 'Orbot is running - new tabs are routed over Tor. Enable the toggle to activate.';
+  } else if (Android.orbotInstalled()) {
+    name.textContent = 'Onion mode (Orbot not started)';
+    desc.textContent = 'Orbot is installed but not connected. Open Orbot and connect, then enable this toggle.';
+  } else {
+    name.textContent = 'Onion mode (Orbot not installed)';
+    desc.textContent = 'Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app.';
+  }
+}
+onionStatusText();
 
 var v = Android.version();
 document.getElementById('version').textContent = 'Provito v' + v;

@@ -36,7 +36,7 @@ object Updater {
         if (automatic && !prefs.getBoolean(PREF_UPDATE_CHECK, true)) return
 
         Thread {
-            val release = fetchLatest() ?: run {
+            val release = fetchLatest(activity) ?: run {
                 if (!automatic) {
                     activity.runOnUiThread {
                         Toast.makeText(activity, "Could not check for updates", Toast.LENGTH_SHORT).show()
@@ -66,9 +66,11 @@ object Updater {
         }.start()
     }
 
-    private fun fetchLatest(): ReleaseInfo? {
+    private fun fetchLatest(context: Context): ReleaseInfo? {
         return try {
-            val conn = URL(API).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
+            val conn = URL(API).openConnection(
+                ProxyManager.javaProxy(context) ?: java.net.Proxy.NO_PROXY
+            ) as HttpURLConnection
             conn.connectTimeout = 10000
             conn.readTimeout = 15000
             conn.setRequestProperty("User-Agent", "Provito-Updater")

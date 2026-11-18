@@ -139,15 +139,20 @@ class MainActivity : AppCompatActivity() {
         )
 
         // Defer WebView creation until after the first frame - the native
-        // shell (omnibox + toolbar) is visible instantly.
+        // shell (omnibox + toolbar) is visible instantly. Proxy rules must
+        // be set before the first WebView exists.
         mainHandler.post {
-            val incoming = intent?.dataString
-            if (incoming != null) {
-                newTab(incoming)
-            } else {
-                newTab(HOME_URL)
+            ProxyManager.applyToWebView(this) {
+                runOnUiThread {
+                    val incoming = intent?.dataString
+                    if (incoming != null) {
+                        newTab(incoming)
+                    } else {
+                        newTab(HOME_URL)
+                    }
+                    Updater.maybeCheck(this, automatic = true)
+                }
             }
-            Updater.maybeCheck(this, automatic = true)
         }
     }
 
@@ -343,11 +348,27 @@ class MainActivity : AppCompatActivity() {
         try {
             wv.stopLoading()
             wv.onPause()
+            if (wv.parent != null) webContainer.removeView(wv)
             wv.removeAllViews()
             wv.destroy()
         } catch (_: Exception) {
             // already torn down
         }
+    }
+
+    /** Destroys and recreates every loaded tab so proxy changes take effect. */
+    private fun recreateAllTabs() {
+        val snapshot = synchronized(tabs) { tabs.toList() }
+        for (t in snapshot) {
+            val wv = t.webView ?: continue
+            t.url = wv.url ?: t.url
+            t.title = wv.title?.takeIf { it.isNotBlank() } ?: t.title
+        }
+        webContainer.removeAllViews()
+        for (t in snapshot) unloadTab(t)
+        val cur = current ?: snapshot.firstOrNull() ?: return
+        ensureLoaded(cur)
+        switchTo(cur)
     }
 
     private fun switchTo(tab: Tab) {
@@ -799,6 +820,7 @@ class MainActivity : AppCompatActivity() {
             KEY_AUTO_UI_RESIZE -> prefs.getBoolean(KEY_AUTO_UI_RESIZE, true).toString()
             KEY_WIPE_ON_EXIT -> prefs.getBoolean(KEY_WIPE_ON_EXIT, true).toString()
             KEY_AUTO_UPDATE -> prefs.getBoolean(KEY_AUTO_UPDATE, false).toString()
+            ProxyManager.KEY_ONION_MODE -> prefs.getBoolean(ProxyManager.KEY_ONION_MODE, false).toString()
             Updater.PREF_UPDATE_CHECK -> prefs.getBoolean(Updater.PREF_UPDATE_CHECK, true).toString()
             else -> ""
         }
@@ -830,6 +852,27 @@ class MainActivity : AppCompatActivity() {
                 KEY_AUTO_UPDATE -> {
                     val b = value.toBooleanStrictOrNull() ?: return
                     e.putBoolean(KEY_AUTO_UPDATE, b)
+                }
+                ProxyManager.KEY_ONION_MODE -> {
+                    val b = value.toBooleanStrictOrNull() ?: return
+                    e.putBoolean(ProxyManager.KEY_ONION_MODE, b)
+                    e.apply()
+                    ProxyManager.applyToWebView(this@MainActivity) { ok ->
+                        runOnUiThread {
+                            if (!ok) {
+                                toast("Proxying not supported on this WebView version")
+                            } else if (b && !ProxyManager.isOrbotProxyUp()) {
+                                toast("Orbot is not running - start it, then reload tabs")
+                            } else {
+                                recreateAllTabs()
+                                toast(
+                                    if (b) "Traffic now routed through Tor"
+                                    else "Proxy routing off"
+                                )
+                            }
+                        }
+                    }
+                    return
                 }
                 Updater.PREF_UPDATE_CHECK -> {
                     val b = value.toBooleanStrictOrNull() ?: return
@@ -891,6 +934,17 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 current?.let { closeTab(it) }
             }
+        }
+
+        @JavascriptInterface
+        fun orbotInstalled(): Boolean = ProxyManager.isOrbotInstalled(this@MainActivity)
+
+        @JavascriptInterface
+        fun orbotRunning(): Boolean = ProxyManager.isOrbotProxyUp()
+
+        @JavascriptInterface
+        fun openOrbot() {
+            runOnUiThread { ProxyManager.openOrbot(this@MainActivity) }
         }
     }
 

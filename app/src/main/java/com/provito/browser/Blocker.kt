@@ -120,7 +120,9 @@ class Blocker(private val context: Context) {
             val url = java.net.URL(
                 "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
             )
-            val conn = url.openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
+            val conn = url.openConnection(
+                ProxyManager.javaProxy(context) ?: java.net.Proxy.NO_PROXY
+            ) as java.net.HttpURLConnection
             conn.connectTimeout = 10000
             conn.readTimeout = 20000
             conn.requestMethod = "GET"

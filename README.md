@@ -17,7 +17,8 @@ telemetry, no history, no accounts, and no tracking of any kind**.
 | Fingerprint resistance | Generic user agent (no device model), `flagNoPersonalizedLearning` on the search bar, autofill disabled, Safe Browsing telemetry-free (not enabled). |
 | Data wipe on exit | Cookies, caches, and histories cleared when the app is destroyed (toggleable in the menu). |
 | Auto-updates | Checks the public GitHub Releases API (anonymous GET) for a newer release and asks: *"Would you like to update? This update has: ..."* with the release notes, then downloads and installs the APK. Opt-out in the menu. |
-| No network calls by the app itself | The only outbound requests Provito makes are to GitHub (blocklist updates + release checks) - both opt-in/opt-out, both anonymous. |
+| Onion mode (IP hiding) | Routes all browsing over the free, open-source Tor network via the [Orbot](https://github.com/guardianproject/orbot) app - sites see a Tor exit IP, never yours. Remote DNS via Tor, so no DNS leak. A custom trusted proxy can be configured instead. We deliberately do not ship random "free VPN API" providers: a free anonymous VPN would still see your traffic. |
+| No network calls by the app itself | The only outbound requests Provito makes are to GitHub (blocklist updates + release checks) - both opt-in/opt-out, both anonymous, and routed through the active proxy (Tor) when enabled. |
 
 ## Project structure
 
