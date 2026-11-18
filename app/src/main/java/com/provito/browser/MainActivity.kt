@@ -141,7 +141,12 @@ class MainActivity : AppCompatActivity() {
         wireOmnibox()
         setupResponsiveUi()
         val firstRun = !prefs.getBoolean(SetupView.KEY_SETUP_DONE, false)
-        addSplash(if (firstRun) { showSetup() } else null)
+        val splashEnd: (() -> Unit)? = if (firstRun) {
+            { showSetup() }
+        } else {
+            null
+        }
+        addSplash(splashEnd)
 
         onBackPressedDispatcher.addCallback(
             this,
