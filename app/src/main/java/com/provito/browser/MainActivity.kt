@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         const val HOME_URL = "file:///android_asset/home.html"
         const val TABS_PAGE = "file:///android_asset/tabs.html"
         const val SETTINGS_PAGE = "file:///android_asset/settings.html"
+        const val UNSAFE_PAGE = "file:///android_asset/unsafe.html"
         const val PREFS = "provito_prefs"
 
         const val KEY_AUTO_UPDATE = "auto_update_blocklists"   // blocklist downloads
