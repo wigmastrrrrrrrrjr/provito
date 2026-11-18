@@ -67,6 +67,9 @@ class SplashView @JvmOverloads constructor(
     private var animator: ValueAnimator? = null
     private var textWidth = 0f
 
+    /** Called once when the splash finishes (view already removed). */
+    var onFinished: (() -> Unit)? = null
+
     init {
         // Shape paths from the launcher icon (108x108 viewport), centered.
         fun scaled(pathData: String): Path {
@@ -101,7 +104,9 @@ class SplashView @JvmOverloads constructor(
                 shieldScale = 0.92f + 0.08f * easeOut.getInterpolation(
                     (f / 0.25f).coerceIn(0f, 1f)
                 )
-                checkProgress = ((f - 0.18f) / 0.45f).coerceIn(0f, 1f)
+                checkProgress = easeOut.getInterpolation(
+                    ((f - 0.18f) / 0.45f).coerceIn(0f, 1f)
+                )
                 textAlpha = ((f - 0.45f) / 0.2f).coerceIn(0f, 1f)
                 slide = easeOut.getInterpolation(((f - 0.5f) / 0.25f).coerceIn(0f, 1f))
                 alpha = 1f - ((f - 0.78f) / 0.22f).coerceIn(0f, 1f)
@@ -113,6 +118,7 @@ class SplashView @JvmOverloads constructor(
                     if (done) return
                     done = true
                     (parent as? android.view.ViewGroup)?.removeView(this@SplashView)
+                    onFinished?.invoke()
                 }
             })
             start()

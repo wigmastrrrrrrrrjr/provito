@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -139,7 +140,8 @@ class MainActivity : AppCompatActivity() {
         wireChrome()
         wireOmnibox()
         setupResponsiveUi()
-        addSplash()
+        val firstRun = !prefs.getBoolean(SetupView.KEY_SETUP_DONE, false)
+        addSplash(if (firstRun) { showSetup() } else null)
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -160,7 +162,9 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         newTab(HOME_URL)
                     }
-                    Updater.maybeCheck(this, automatic = true)
+                    if (!firstRun) {
+                        Updater.maybeCheck(this, automatic = true)
+                    }
                 }
             }
         }
@@ -176,13 +180,18 @@ class MainActivity : AppCompatActivity() {
     /** Startup animation overlay: shield, drawn check mark, logo slides
      *  beside "Provito", fades out over the loaded app. Pure canvas view,
      *  no startup cost, skipped if system animations are disabled. */
-    private fun addSplash() {
+    private fun addSplash(onEnd: (() -> Unit)? = null) {
         val scale = android.provider.Settings.Global.getFloat(
             contentResolver,
             android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
         )
-        if (scale == 0f) return
+        if (scale == 0f) {
+            onEnd?.invoke()
+            return
+        }
         val splash = SplashView(this)
+        splash.onFinished = onEnd
+        splash.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         (window.decorView as android.view.ViewGroup).addView(
             splash,
             ViewGroup.LayoutParams(
@@ -191,6 +200,23 @@ class MainActivity : AppCompatActivity() {
             )
         )
         splash.post { splash.start() }
+    }
+
+    /** First-run setup: slides up over the app once the splash ends. */
+    private fun showSetup() {
+        val setup = SetupView(this)
+        setup.onFinished = {
+            blocker.enabled = prefs.getBoolean(KEY_BLOCK_ADS, true)
+            Updater.maybeCheck(this, automatic = true)
+        }
+        (window.decorView as android.view.ViewGroup).addView(
+            setup,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        setup.post { setup.start() }
     }
 
     // ---------- Responsive UI engine ----------
