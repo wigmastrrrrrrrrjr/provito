@@ -14,18 +14,56 @@ import java.io.InputStream
  *  - "phishing" : warn. The user can continue for that host for the rest
  *                 of the session (in RAM only, never persisted).
  *
- * Bundled starter list: assets/unsafe_list.txt (curated patterns from
- * public abuse reporting). Full coverage via the free open-source
- * Phishing Army blocklist: https://phishing.army (daily updated, free).
+ * Sources (all free/open, verified live):
+ *  - Phishing Army (community phishing blocklist, MIT)
+ *  - malware-filter phishing-filter (Phishing Army/URLhaus derived, MIT/CC0)
+ *  - malware-filter urlhaus-filter (abuse.ch URLhaus mirror, CC0)
+ *  - OpenPhish free community feed
+ *  - Spam404 community blacklist
+ *  - stamparm/blackbook (malware domains)
  *
+ * A bundled starter list covers offline use before any download.
  * Everything is checked locally; nothing is uploaded anywhere.
  */
 class UnsafeSites(private val context: Context) {
 
     companion object {
-        const val DOWNLOAD_URL =
-            "https://phishing.army/download/phishing_army_blocklist.txt"
         const val DOWNLOAD_FILE = "unsafe_download.txt"
+
+        /** Open-source lists with their severity. */
+        val SOURCES = arrayOf(
+            // phishing Army community blocklist (extended)
+            Source(
+                "https://phishing.army/download/phishing_army_blocklist_extended.txt",
+                "phishing", "Phishing Army"
+            ),
+            // malware-filter phishing blocklist (daily, MIT/CC0)
+            Source(
+                "https://malware-filter.gitlab.io/malware-filter/phishing-filter-domains.txt",
+                "phishing", "phishing-filter"
+            ),
+            // malware-filter urlhaus mirror (malware distribution domains, CC0)
+            Source(
+                "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-domains.txt",
+                "malware", "URLhaus filter"
+            ),
+            // OpenPhish free community feed (URLs; hosts extracted)
+            Source("https://openphish.com/feed.txt", "phishing", "OpenPhish"),
+            // Spam404 community scam/phishing blacklist
+            Source(
+                "https://raw.githubusercontent.com/Spam404/lists/master/main-blacklist.txt",
+                "phishing", "Spam404"
+            ),
+            // stamparm/blackbook malware domains
+            Source(
+                "https://raw.githubusercontent.com/stamparm/blackbook/master/blackbook.txt",
+                "malware", "Blackbook"
+            )
+        )
+    }
+
+    data class Source(val url: String, val severity: String, val name: String) {
+        val cacheFile: String get() = "unsafe_src_${SOURCES.indexOf(this)}.txt"
     }
 
     @Volatile private var ready = false
@@ -45,39 +83,78 @@ class UnsafeSites(private val context: Context) {
     }
 
     fun load() {
-        val malware = HashSet<String>(256)
-        val phishing = HashSet<String>(8192)
+        val malware = HashSet<String>(2048)
+        val phishing = HashSet<String>(65536)
+
+        // Bundled starter list (severity via #malware/#phishing sections).
         runCatching {
-            parse(context.assets.open("unsafe_list.txt"), malware, phishing)
+            parse(context.assets.open("unsafe_list.txt"), malware, phishing, null)
         }
-        runCatching {
-            val f = File(context.filesDir, DOWNLOAD_FILE)
-            if (f.exists()) f.inputStream().use { parse(it, malware, phishing) }
+        // Downloaded sources, severity per source config.
+        for (src in SOURCES) {
+            val f = File(context.filesDir, src.cacheFile)
+            if (f.exists()) {
+                runCatching {
+                    f.inputStream().use { parse(it, malware, phishing, src.severity) }
+                }
+            }
         }
+        // Legacy single-file download (older versions).
+        val legacy = File(context.filesDir, DOWNLOAD_FILE)
+        if (legacy.exists()) {
+            runCatching {
+                legacy.inputStream().use { parse(it, malware, phishing, "phishing") }
+            }
+        }
+
         malwareHosts = malware
         phishingHosts = phishing
         ready = true
     }
 
-    /** Sections: "#malware" -> hard block set, "#phishing" -> warn set. */
-    private fun parse(input: InputStream, malware: MutableSet<String>, phishing: MutableSet<String>) {
+    /**
+     * Parses a list. When [forcedSeverity] is null the file can switch sets
+     * with "#malware" / "#phishing" section markers (bundled list format).
+     * Handles plain domains, hosts-file lines and full URLs.
+     */
+    private fun parse(
+        input: InputStream,
+        malware: MutableSet<String>,
+        phishing: MutableSet<String>,
+        forcedSeverity: String?
+    ) {
         var section = "phishing"
         input.bufferedReader().useLines { lines ->
             for (raw in lines) {
                 val line = raw.trim()
-                if (line.isEmpty() || line.startsWith("#!")) continue
-                if (line.startsWith("#malware")) { section = "malware"; continue }
-                if (line.startsWith("#phishing")) { section = "phishing"; continue }
-                if (line.startsWith("#")) continue
+                if (line.isEmpty()) continue
+                if (line.startsWith("#malware") && forcedSeverity == null) {
+                    section = "malware"; continue
+                }
+                if (line.startsWith("#phishing") && forcedSeverity == null) {
+                    section = "phishing"; continue
+                }
+                if (line.startsWith("#") || line.startsWith("//")) continue
                 val domain = extractDomain(line) ?: continue
-                if (domain.length >= 4 && '.' in domain) {
-                    if (section == "malware") malware.add(domain) else phishing.add(domain)
+                if (domain.length < 4 || '.' !in domain) continue
+                if (forcedSeverity == "malware" || (forcedSeverity == null && section == "malware")) {
+                    malware.add(domain)
+                } else {
+                    phishing.add(domain)
                 }
             }
         }
     }
 
+    /** Handles domains, hosts-file entries and full URLs. */
     private fun extractDomain(line: String): String? {
+        if (line.contains("://")) {
+            return try {
+                Uri.parse(line).host?.lowercase()?.trimEnd('.')
+            } catch (_: Exception) {
+                null
+            }
+        }
         val parts = line.split(Regex("\\s+"))
         for (p in parts) {
             val lower = p.lowercase()
@@ -122,10 +199,22 @@ class UnsafeSites(private val context: Context) {
         }
     }
 
-    /** Downloads the free open-source Phishing Army blocklist (anonymous GET). */
-    fun downloadUpdatedList(): Boolean {
+    /**
+     * Downloads every open-source source (anonymous GETs, sequential).
+     * Returns the number of sources that succeeded.
+     */
+    fun downloadAllSources(): Int {
+        var ok = 0
+        for (src in SOURCES) {
+            if (downloadOne(src)) ok++
+        }
+        load()
+        return ok
+    }
+
+    private fun downloadOne(src: Source): Boolean {
         return try {
-            val conn = java.net.URL(DOWNLOAD_URL).openConnection(
+            val conn = java.net.URL(src.url).openConnection(
                 ProxyManager.javaProxy(context) ?: java.net.Proxy.NO_PROXY
             ) as java.net.HttpURLConnection
             conn.connectTimeout = 10000
@@ -134,19 +223,12 @@ class UnsafeSites(private val context: Context) {
             if (conn.responseCode !in 200..299) {
                 conn.disconnect(); return false
             }
-            val tmp = File(context.filesDir, "$DOWNLOAD_FILE.tmp")
+            val tmp = File(context.filesDir, "${src.cacheFile}.tmp")
             conn.inputStream.use { input ->
                 tmp.outputStream().use { input.copyTo(it) }
             }
             conn.disconnect()
-            val dest = File(context.filesDir, DOWNLOAD_FILE)
-            if (tmp.renameTo(dest)) {
-                load()
-                true
-            } else {
-                tmp.delete()
-                false
-            }
+            tmp.renameTo(File(context.filesDir, src.cacheFile))
         } catch (_: Exception) {
             false
         }

@@ -132,7 +132,7 @@ class MainActivity : AppCompatActivity() {
                 Thread { if (blocker.downloadUpdatedList()) runOnUiThread { refreshShieldBadge() } }.start()
             }
             if (!unsafeDownloadExists()) {
-                Thread { unsafeSites.downloadUpdatedList() }.start()
+                Thread { unsafeSites.downloadAllSources() }.start()
             }
         }
 
@@ -1032,11 +1032,15 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, "Updating unsafe-site lists...", Toast.LENGTH_SHORT).show()
             }
             Thread {
-                val ok = unsafeSites.downloadUpdatedList()
+                val okCount = unsafeSites.downloadAllSources()
                 runOnUiThread {
                     toast(
-                        if (ok) "Unsafe-site lists updated (malware: ${unsafeSites.malwareCount}, phishing: ${unsafeSites.phishingCount})"
-                        else "Update failed - check connection"
+                        if (okCount > 0) {
+                            "Updated $okCount/${UnsafeSites.SOURCES.size} lists " +
+                                "(malware: ${unsafeSites.malwareCount}, phishing: ${unsafeSites.phishingCount})"
+                        } else {
+                            "Update failed - check connection"
+                        }
                     )
                 }
             }.start()
