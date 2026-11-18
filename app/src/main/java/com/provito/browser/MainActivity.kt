@@ -139,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         wireChrome()
         wireOmnibox()
         setupResponsiveUi()
+        addSplash()
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -171,6 +172,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun getCurrentVersionName(): String = BuildConfig.VERSION_NAME
+
+    /** Startup animation overlay: shield, drawn check mark, logo slides
+     *  beside "Provito", fades out over the loaded app. Pure canvas view,
+     *  no startup cost, skipped if system animations are disabled. */
+    private fun addSplash() {
+        val scale = android.provider.Settings.Global.getFloat(
+            contentResolver,
+            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+        )
+        if (scale == 0f) return
+        val splash = SplashView(this)
+        (window.decorView as android.view.ViewGroup).addView(
+            splash,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        splash.post { splash.start() }
+    }
 
     // ---------- Responsive UI engine ----------
 
