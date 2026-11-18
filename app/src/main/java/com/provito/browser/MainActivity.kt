@@ -306,10 +306,12 @@ class MainActivity : AppCompatActivity() {
         wv.webChromeClient = PrivacyChromeClient(wv)
 
         // JS bridges only on Provito's own chrome pages - never exposed to
-        // websites.
-        if (tab.isOverlay) {
-            wv.addJavascriptInterface(SettingsBridge(), "ProvitoSettings")
-            wv.addJavascriptInterface(TabsBridge(), "ProvitoTabs")
+        // websites. Both HTML pages call the interface as "Android".
+        if (tab.url == TABS_PAGE) {
+            wv.addJavascriptInterface(TabsBridge(), "Android")
+        }
+        if (tab.url == SETTINGS_PAGE) {
+            wv.addJavascriptInterface(SettingsBridge(), "Android")
         }
 
         wv.loadUrl(tab.url)
