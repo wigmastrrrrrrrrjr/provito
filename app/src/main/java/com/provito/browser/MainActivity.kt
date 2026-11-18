@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var blocker: Blocker
+    private lateinit var unsafeSites: UnsafeSites
 
     private lateinit var webContainer: FrameLayout
     private lateinit var omnibox: EditText
@@ -110,6 +111,8 @@ class MainActivity : AppCompatActivity() {
         blocker.enabled = prefs.getBoolean(KEY_BLOCK_ADS, true)
         // Parse blocklists off the main thread so the shell paints immediately.
         blocker.loadAsync()
+        unsafeSites = UnsafeSites(this)
+        unsafeSites.loadAsync()
 
         setContentView(R.layout.activity_main)
         webContainer = findViewById(R.id.webContainer)
@@ -123,8 +126,13 @@ class MainActivity : AppCompatActivity() {
         // synchronous init that otherwise lands on startup).
         Thread { CookieManager.getInstance().setAcceptCookie(true) }.start()
 
-        if (prefs.getBoolean(KEY_AUTO_UPDATE, false) && !blockerHostsFileExists()) {
-            Thread { if (blocker.downloadUpdatedList()) runOnUiThread { refreshShieldBadge() } }.start()
+        if (prefs.getBoolean(KEY_AUTO_UPDATE, false)) {
+            if (!blockerHostsFileExists()) {
+                Thread { if (blocker.downloadUpdatedList()) runOnUiThread { refreshShieldBadge() } }.start()
+            }
+            if (!unsafeDownloadExists()) {
+                Thread { unsafeSites.downloadUpdatedList() }.start()
+            }
         }
 
         wireChrome()
@@ -257,6 +265,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun newTab(url: String = HOME_URL): Tab {
         val tab = Tab(url)
+        loadTarget(tab, url)
         synchronized(tabs) { tabs.add(tab) }
         tab.lastUsed = System.currentTimeMillis()
         ensureLoaded(tab)
@@ -264,6 +273,38 @@ class MainActivity : AppCompatActivity() {
         switchTo(tab)
         return tab
     }
+
+    // ---------- Unsafe-site shield ----------
+
+    private fun warningUrl(target: String, level: String): String =
+        UNSAFE_PAGE + "?level=" + level + "&u=" + URLEncoder.encode(target, "UTF-8")
+
+    /** Returns the URL to actually load: target, or the warning page. */
+    private fun loadTarget(tab: Tab, url: String) {
+        tab.url = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
+    }
+
+    private fun loadInTab(tab: Tab, url: String) {
+        // Chrome pages opened via the omnibox must be proper overlay tabs
+        // so their JS bridges get attached.
+        if (url == TABS_PAGE) {
+            openTabsPage()
+            return
+        }
+        if (url == SETTINGS_PAGE) {
+            openSettingsPage()
+            return
+        }
+        val final = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
+        omnibox.setText(final)
+        tab.webView?.loadUrl(final)
+    }
+
+    private fun tabFor(view: WebView): Tab? =
+        synchronized(tabs) { tabs.firstOrNull { it.webView === view } }
+
+    private fun unsafeDownloadExists(): Boolean =
+        java.io.File(filesDir, UnsafeSites.DOWNLOAD_FILE).exists()
 
     /** Creates (or recreates) the WebView backing a tab. */
     @SuppressLint("SetJavaScriptEnabled")
@@ -457,7 +498,16 @@ class MainActivity : AppCompatActivity() {
         ): Boolean {
             val url = request.url
             val scheme = url.scheme ?: return false
+
             if (scheme == "http" || scheme == "https") {
+                // Unsafe-site shield: check every main-frame navigation.
+                if (request.isForMainFrame) {
+                    val level = unsafeSites.level(url.toString())
+                    if (level != null) {
+                        view.loadUrl(warningUrl(url.toString(), level))
+                        return true
+                    }
+                }
                 // Provito chrome pages never navigate in place: links open
                 // in a fresh (bridge-free) tab instead.
                 if ((view.url ?: "").startsWith("file:///android_asset/")) {
@@ -466,6 +516,36 @@ class MainActivity : AppCompatActivity() {
                 }
                 return false
             }
+
+            // Provito internal actions.
+            if (scheme == "provito") {
+                when (url.host) {
+                    "unsafe-continue" -> {
+                        val target = try {
+                            url.getQueryParameter("u")
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (target != null) {
+                            unsafeSites.allowSession(target)
+                            runOnUiThread {
+                                val warningTab = tabFor(view)
+                                newTab(target)
+                                warningTab?.let { closeTab(it) }
+                            }
+                        }
+                    }
+                    "home" -> {
+                        runOnUiThread {
+                            val warningTab = tabFor(view)
+                            newTab(HOME_URL)
+                            warningTab?.let { closeTab(it) }
+                        }
+                    }
+                }
+                return true
+            }
+
             // Non-web scheme (mailto:, tel:, app links...) -> hand to the system.
             return try {
                 startActivity(
@@ -479,6 +559,14 @@ class MainActivity : AppCompatActivity() {
 
         override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
             super.onPageStarted(view, url, favicon)
+            // Backstop: catches JS redirects and any navigation that slipped
+            // past the client checks.
+            val level = unsafeSites.level(url)
+            if (level != null) {
+                view.stopLoading()
+                view.loadUrl(warningUrl(url, level))
+                return
+            }
             if (view == current?.webView) omnibox.setText(url)
             progress.show()
             progress.setIndeterminate(true)
@@ -662,7 +750,8 @@ class MainActivity : AppCompatActivity() {
         }
         hideKeyboard()
         omnibox.clearFocus()
-        (current ?: newTab(HOME_URL)).webView?.loadUrl(url)
+        val tab = current ?: newTab(HOME_URL)
+        loadInTab(tab, url)
     }
 
     private fun looksLikeUrl(s: String): Boolean {
@@ -934,6 +1023,22 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 current?.let { closeTab(it) }
             }
+        }
+
+        @JavascriptInterface
+        fun updateUnsafeLists() {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Updating unsafe-site lists...", Toast.LENGTH_SHORT).show()
+            }
+            Thread {
+                val ok = unsafeSites.downloadUpdatedList()
+                runOnUiThread {
+                    toast(
+                        if (ok) "Unsafe-site lists updated (malware: ${unsafeSites.malwareCount}, phishing: ${unsafeSites.phishingCount})"
+                        else "Update failed - check connection"
+                    )
+                }
+            }.start()
         }
 
         @JavascriptInterface
