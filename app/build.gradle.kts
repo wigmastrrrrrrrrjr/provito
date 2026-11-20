@@ -64,6 +64,14 @@ android {
         buildConfig = true
     }
 
+    lint {
+        // The androidx.lifecycle lint detector crashes inside lint's Kotlin
+        // analysis API on Kotlin 2.1 (IncompatibleClassChangeError). That is
+        // a lint bug, not an app problem, so release lint is skipped.
+        disable += "NullSafeMutableLiveData"
+        checkReleaseBuilds = false
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
