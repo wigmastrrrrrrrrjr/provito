@@ -123,9 +123,13 @@ class UnsafeSites(private val context: Context) {
         phishing: MutableSet<String>,
         forcedSeverity: String?
     ) {
+        // Hard cap: protects against a pathological or malicious list
+        // causing an out-of-memory crash. Normal feeds are well below this.
+        val cap = 1_200_000
         var section = "phishing"
         input.bufferedReader().useLines { lines ->
             for (raw in lines) {
+                if (malware.size + phishing.size >= cap) break
                 val line = raw.trim()
                 if (line.isEmpty()) continue
                 if (line.startsWith("#malware") && forcedSeverity == null) {

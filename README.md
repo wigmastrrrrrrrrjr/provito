@@ -89,6 +89,20 @@ hiding it - honesty beats marketing. That means:
   issue or PR.
 - If you want to improve it, you are welcome - it is fully open source (MIT).
 
+## Security notes / known limitations
+
+- The rendering engine is Android's WebView (Chromium/Blink), patched by
+  Google Play System Updates. Provito does not bundle its own engine.
+- Blocklist and unsafe-site downloads are plain anonymous HTTPS GETs; there is
+  no cryptographic signature on the list content (a compromised source could
+  inject bad rules, but cannot execute code).
+- Update APKs are downloaded from GitHub Releases over HTTPS and installed by
+  Android, which rejects any APK not signed with Provito's release key. There
+  is no extra in-app hash check.
+- Cleartext HTTP browsing is allowed (like Chrome) so legacy sites work; HTTPS
+  is always preferred and mixed content is never allowed.
+- Unsafe-site bypass choices live in RAM only and reset when the app dies.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).

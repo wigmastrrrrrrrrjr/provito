@@ -348,9 +348,31 @@ class MainActivity : AppCompatActivity() {
             openSettingsPage()
             return
         }
+        // Never navigate an overlay tab in place: its WebView carries the
+        // JS bridge, and navigating it to web content would expose the
+        // bridge to that site. Open a fresh, bridge-free tab instead.
+        if (tab.isOverlay) {
+            newTab(url)
+            return
+        }
         val final = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
         omnibox.setText(final)
         tab.webView?.loadUrl(final)
+    }
+
+    /** Waits (briefly, bounded) for the unsafe lists to finish parsing so
+     *  the shield can't be raced on the very first navigation. */
+    private fun loadWhenShieldReady(tab: Tab, url: String, attempts: Int = 0) {
+        val wv = tab.webView ?: return
+        if (tab.url != url) return
+        if (unsafeSites.isReady || attempts >= 10 || !url.startsWith("http")) {
+            val final = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
+            tab.url = final
+            wv.loadUrl(final)
+            if (tab === current) omnibox.setText(final)
+            return
+        }
+        mainHandler.postDelayed({ loadWhenShieldReady(tab, url, attempts + 1) }, 200)
     }
 
     private fun tabFor(view: WebView): Tab? =
@@ -413,8 +435,12 @@ class MainActivity : AppCompatActivity() {
             wv.addJavascriptInterface(SettingsBridge(), "Android")
         }
 
-        wv.loadUrl(tab.url)
         tab.webView = wv
+        if (tab.url.startsWith("http") && !unsafeSites.isReady) {
+            loadWhenShieldReady(tab, tab.url)
+        } else {
+            wv.loadUrl(tab.url)
+        }
     }
 
     /** Estimated total tab RAM: ~30 MB per loaded tab, budget ~1 GB. */
@@ -466,6 +492,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchTo(tab: Tab) {
+        val previous = current
+        if (previous != null && previous !== tab) {
+            // Pause background tabs: stops JS timers, video and audio from
+            // running in the background (privacy + battery + RAM).
+            previous.webView?.onPause()
+        }
         current = tab
         ensureLoaded(tab)
         tab.lastUsed = System.currentTimeMillis()
@@ -572,6 +604,12 @@ class MainActivity : AppCompatActivity() {
 
             // Provito internal actions.
             if (scheme == "provito") {
+                // SECURITY: only Provito's own warning page may trigger these
+                // actions. Otherwise any website could navigate to
+                // provito://unsafe-continue?u=... and whitelist itself.
+                val fromWarningPage = (view.url ?: "").startsWith(UNSAFE_PAGE)
+                if (!fromWarningPage) return true
+
                 when (url.host) {
                     "unsafe-continue" -> {
                         val target = try {
@@ -628,7 +666,10 @@ class MainActivity : AppCompatActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
-            current?.title = view.title?.takeIf { it.isNotBlank() } ?: current?.title ?: "New tab"
+            val tab = tabFor(view)
+            if (tab != null) {
+                tab.title = view.title?.takeIf { it.isNotBlank() } ?: tab.title
+            }
             if (view == current?.webView) {
                 omnibox.setText(url)
                 view.requestFocus()
@@ -648,6 +689,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var popupTempWebView: WebView? = null
+
     private inner class PrivacyChromeClient(private val owner: WebView) : WebChromeClient() {
 
         override fun onCreateWindow(
@@ -657,7 +700,9 @@ class MainActivity : AppCompatActivity() {
             resultMsg: android.os.Message
         ): Boolean {
             // Intercept target=_blank: open it as a new Provito tab (popup-safe).
+            popupTempWebView?.destroy()
             val hv = WebView(this@MainActivity)
+            popupTempWebView = hv
             hv.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
                     v: WebView,
@@ -665,6 +710,8 @@ class MainActivity : AppCompatActivity() {
                 ): Boolean {
                     runOnUiThread {
                         newTab(request.url.toString())
+                        popupTempWebView?.destroy()
+                        popupTempWebView = null
                     }
                     return true
                 }
@@ -938,6 +985,7 @@ class MainActivity : AppCompatActivity() {
             removeAllCookies(null)
             flush()
         }
+        android.webkit.WebStorage.getInstance().deleteAllData()
         WebViewDatabase.getInstance(this).clearFormData()
         WebViewDatabase.getInstance(this).clearHttpAuthUsernamePassword()
         synchronized(tabs) {
@@ -947,6 +995,16 @@ class MainActivity : AppCompatActivity() {
                 tab.webView?.clearCache(true)
             }
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        current?.webView?.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        current?.webView?.onResume()
     }
 
     // ---------- HTML chrome-page bridges ----------
@@ -1111,16 +1169,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class TabsBridge {
-        private fun esc(s: String): String =
-            s.replace("\\", "\\\\").replace("\"", "\\\"")
+        private fun esc(s: String): String = buildString(s.length + 8) {
+            for (c in s) {
+                when (c) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> if (c.code < 0x20) append(' ') else append(c)
+                }
+            }
+        }
+
+        private fun displayTitle(tab: Tab, raw: String?): String {
+            if (tab.url == TABS_PAGE) return "Tabs"
+            if (tab.url == SETTINGS_PAGE) return "Settings"
+            if (tab.url == UNSAFE_PAGE) return "Blocked site"
+            return raw?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "New tab" }
+        }
 
         @JavascriptInterface
         fun getTabs(): String = synchronized(tabs) {
             val sb = StringBuilder("[")
             for ((i, tab) in tabs.withIndex()) {
                 val wv = tab.webView
-                val title = wv?.title?.takeIf { it.isNotBlank() }
-                    ?: tab.title.ifBlank { "New tab" }
+                val title = displayTitle(tab, wv?.title)
                 val url = wv?.url ?: tab.url
                 sb.append("{\"id\":").append(i)
                     .append(",\"title\":\"").append(esc(title))
@@ -1162,11 +1236,11 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         val wipe = prefs.getBoolean(KEY_WIPE_ON_EXIT, true)
         if (wipe) {
-            CookieManager.getInstance().apply {
-                removeAllCookies(null)
-                flush()
-            }
+            wipeBrowsingData()
         }
+        Updater.cleanup(this)
+        popupTempWebView?.destroy()
+        popupTempWebView = null
         synchronized(tabs) {
             for (tab in tabs.toList()) {
                 tab.webView?.destroy()

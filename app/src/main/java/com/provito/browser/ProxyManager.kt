@@ -95,20 +95,15 @@ object ProxyManager {
     }
 
     fun openOrbot(context: Context) {
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri(ORBOT_PACKAGE))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        }.onFailure {
-            runCatching {
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW, Uri("market://details?id=$ORBOT_PACKAGE"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            }
-        }
+        val market = Intent(
+            Intent.ACTION_VIEW,
+            android.net.Uri.parse("market://details?id=$ORBOT_PACKAGE")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val web = Intent(
+            Intent.ACTION_VIEW,
+            android.net.Uri.parse("https://play.google.com/store/apps/details?id=$ORBOT_PACKAGE")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(market) }
+            .onFailure { runCatching { context.startActivity(web) } }
     }
-
-    private fun Uri(u: String): android.net.Uri = android.net.Uri.parse(u)
 }

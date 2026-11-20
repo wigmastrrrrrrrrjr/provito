@@ -81,7 +81,8 @@ class SetupView(context: Context) : FrameLayout(context) {
         val col = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28f), dp(40f), dp(28f), dp(28f))
+            // Bottom padding leaves room for the pinned Continue button.
+            setPadding(dp(28f), dp(40f), dp(28f), dp(116f))
         }
 
         col.addView(ImageView(context).apply {

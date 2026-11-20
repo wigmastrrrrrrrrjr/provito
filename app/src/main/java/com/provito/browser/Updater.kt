@@ -29,6 +29,15 @@ object Updater {
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
     const val PREF_UPDATE_CHECK = "update_check_enabled"
 
+    /** Registered download-complete receiver, cleaned up in onDestroy. */
+    private var pendingReceiver: BroadcastReceiver? = null
+
+    /** Must be called from the activity's onDestroy to avoid a leak. */
+    fun cleanup(activity: MainActivity) {
+        pendingReceiver?.let { runCatching { activity.unregisterReceiver(it) } }
+        pendingReceiver = null
+    }
+
     private class ReleaseInfo(val version: String, val notes: String, val apkUrl: String)
 
     fun maybeCheck(activity: MainActivity, automatic: Boolean) {
@@ -167,10 +176,13 @@ object Updater {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
                 if (intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) != id) return
-                activity.unregisterReceiver(this)
+                pendingReceiver = null
+                runCatching { activity.unregisterReceiver(this) }
                 install(activity, File(activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), name))
             }
         }
+        pendingReceiver?.let { runCatching { activity.unregisterReceiver(it) } }
+        pendingReceiver = receiver
         val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
         if (Build.VERSION.SDK_INT >= 33) {
             activity.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -186,7 +198,9 @@ object Updater {
             return
         }
         try {
-            val staged = File(activity.filesDir, "update.apk")
+            val updatesDir = File(activity.filesDir, "updates").apply { mkdirs() }
+            val staged = File(updatesDir, "update.apk")
+            if (staged.exists()) staged.delete()
             apk.inputStream().use { input ->
                 FileOutputStream(staged).use { output -> input.copyTo(output) }
             }
