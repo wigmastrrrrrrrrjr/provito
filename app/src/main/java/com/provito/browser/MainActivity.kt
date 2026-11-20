@@ -534,8 +534,16 @@ class MainActivity : AppCompatActivity() {
             session: GeckoSession,
             uri: String
         ): GeckoResult<GeckoSession>? {
-            val tab = newTab(uri)
-            return tab.session?.let { GeckoResult.fromValue(it) }
+            // Create the tab but attach it to our GeckoView only after
+            // GeckoView has finished setting up the new window.
+            val tab = Tab(uri)
+            loadTarget(tab, uri)
+            synchronized(tabs) { tabs.add(tab) }
+            tab.lastUsed = System.currentTimeMillis()
+            ensureLoaded(tab)
+            val created = tab.session ?: return null
+            mainHandler.post { if (tabs.contains(tab)) switchTo(tab) }
+            return GeckoResult.fromValue(created)
         }
 
         override fun onLoadError(
@@ -1143,6 +1151,7 @@ class MainActivity : AppCompatActivity() {
             "unsafe-update" -> updateUnsafeLists()
             "wipe" -> {
                 wipeBrowsingData()
+                recreateAllTabs()
                 toast("Browsing data cleared")
             }
         }
@@ -1212,6 +1221,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 R.id.action_clear_data -> {
                     wipeBrowsingData()
+                    recreateAllTabs()
                     toast("Browsing data cleared")
                     true
                 }

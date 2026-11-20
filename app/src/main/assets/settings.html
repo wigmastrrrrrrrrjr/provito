@@ -210,7 +210,6 @@
     Engine: GeckoView 140 (Firefox). No accounts. No history. No telemetry. Honestly vibecoded.
   </div>
 
-<iframe id="act" style="display:none"></iframe>
 <script>
 var params = new URLSearchParams(location.hash.slice(1));
 
@@ -222,9 +221,10 @@ function flag(k, d) {
   var v = q(k, d);
   return v === '1' || v === 'true';
 }
+// Provito intercepts provito:// navigations and denies them, so the
+// current page never actually unloads - this is the JS->native channel.
 function act(url) {
-  var f = document.getElementById('act');
-  if (f) f.src = url;
+  location.href = url;
 }
 function bindSwitch(key, value) {
   var el = document.querySelector('input[data-key="' + key + '"]');

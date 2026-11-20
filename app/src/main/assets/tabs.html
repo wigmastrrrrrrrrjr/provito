@@ -115,7 +115,6 @@
   <div class="grid" id="grid"></div>
   <div class="fab-wrap"><button class="fab" onclick="act('provito://tab?op=new')">+ New tab</button></div>
 
-<iframe id="act" style="display:none"></iframe>
 <script>
 var params = new URLSearchParams(location.hash.slice(1));
 var tabs = [];
@@ -127,9 +126,10 @@ function esc(s) {
   });
 }
 
+// Provito intercepts provito:// navigations and denies them, so the
+// current page never actually unloads - this is the JS->native channel.
 function act(url) {
-  var f = document.getElementById('act');
-  if (f) f.src = url;
+  location.href = url;
 }
 
 function render() {
