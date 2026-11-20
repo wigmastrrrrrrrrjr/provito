@@ -1,36 +1,44 @@
 # Provito
 
 A private, mobile-first web browser for Android. Powered by **Brave Search**,
-built-in **ad and tracker blocking**, and hardened WebView settings — with **no
+Mozilla's independent **GeckoView engine** (the Firefox engine, not the system
+WebView), strict tracking protection, and an unsafe-site shield — with **no
 telemetry, no history, no accounts, and no tracking of any kind**.
 
 ## Privacy features
 
 | Feature | How it works |
 |---|---|
-| Ad + tracker blocking | Local rule engine (`Blocker.kt`) checks every request in `shouldInterceptRequest` against a bundled open-source blocklist. Optionally updates from the MIT-licensed [StevenBlack/hosts](https://github.com/StevenBlack/hosts) list — an anonymous GET, opt-in. |
+| Ad + tracker blocking | GeckoView's strict Enhanced Tracking Protection blocks trackers, cryptominers, fingerprinters and social trackers at the engine level, plus query-parameter stripping and cookie purging. |
 | Brave Search | Default engine for everything typed in the omnibox and on the home page. |
 | No history | No browsing history database, no session persistence — tabs live only in memory. |
 | No cookies that follow you | Third-party cookies are permanently disabled; first-party cookies are wiped on exit (default on). |
-| Hardened WebView | Cache disabled, form data and password saving off, mixed content never allowed, popups/silent window opens blocked, `file://` and `content://` access denied. |
+| Hardened engine | Private sessions (no disk writes), no autofill or login saving, `file://` limited to the app's own assets, popups open as tabs instead of windows, permissions denied by default. |
 | Permission lockdown | Geolocation, camera, and microphone requests are denied automatically. |
-| Fingerprint resistance | Generic user agent (no device model), `flagNoPersonalizedLearning` on the search bar, autofill disabled, Safe Browsing telemetry-free (not enabled). |
+| Fingerprint resistance | GeckoView fingerprinting protection (normal + private browsing), Global Privacy Control, generic mobile user agent (no device model), autofill disabled. |
 | Data wipe on exit | Cookies, caches, and histories cleared when the app is destroyed (toggleable in the menu). |
 | Auto-updates | Checks the public GitHub Releases API (anonymous GET) for a newer release and asks: *"Would you like to update? This update has: ..."* with the release notes, then downloads and installs the APK. Opt-out in the menu. |
 | Onion mode (IP hiding) | Routes all browsing over the free, open-source Tor network via the [Orbot](https://github.com/guardianproject/orbot) app - sites see a Tor exit IP, never yours. Remote DNS via Tor, so no DNS leak. A custom trusted proxy can be configured instead. We deliberately do not ship random "free VPN API" providers: a free anonymous VPN would still see your traffic. |
 | Unsafe-site shield | Every navigation is checked locally against **six open-source lists**: Phishing Army (extended), malware-filter phishing-filter, malware-filter URLhaus (abuse.ch mirror), OpenPhish free feed, Spam404, and stamparm/blackbook - plus a bundled offline starter list. Known malware sites are hard-blocked with no bypass; known phishing sites get a full-screen warning and can only be opened after clicking "I continue to unsafe content" - which remembers that site for the session, in RAM only, never persisted. |
-| No network calls by the app itself | The only outbound requests Provito makes are to GitHub (blocklist updates + release checks) - both opt-in/opt-out, both anonymous, and routed through the active proxy (Tor) when enabled. |
+| No network calls by the app itself | The only outbound requests Provito makes are to GitHub (release checks) and the unsafe-site list sources - both opt-in/opt-out, both anonymous, and routed through the active proxy (Tor) when enabled. |
 
 ## Project structure
 
 ```
 app/src/main/
 ├── java/com/provito/browser/
-│   ├── MainActivity.kt     # Browser UI, tabs, WebView hardening
-│   └── Blocker.kt          # Ad/tracker blocking engine
+│   ├── MainActivity.kt     # Browser shell, tabs, GeckoSession delegates
+│   ├── Engine.kt           # GeckoRuntime + content-blocking configuration
+│   ├── ProxyManager.kt     # Tor/Orbot and custom proxy (Gecko prefs)
+│   ├── UnsafeSites.kt      # Six-source unsafe-site shield
+│   ├── Updater.kt          # GitHub Releases update flow
+│   ├── SplashView.kt       # Startup animation
+│   └── SetupView.kt        # First-run wizard
 ├── assets/
-│   ├── blocklist.txt       # Bundled offline blocklist
-│   └── home.html           # Provito start page (Brave search)
+│   ├── home.html           # Start page (Brave search)
+│   ├── tabs.html           # Tab switcher (provito:// actions)
+│   ├── settings.html       # Settings (provito:// actions)
+│   └── unsafe.html         # Blocked-site warning
 └── res/                    # Layouts, icons, menu
 ```
 
@@ -52,13 +60,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 - Type a query in the omnibox -> **Brave Search**. Type a URL -> goes there.
 - Bottom bar: back / forward / home / refresh / tabs / menu.
 - Shield icon (top left) -> live privacy stats.
-- Menu -> update blocklists, toggle auto-updates, clear data, wipe on exit.
-
-## Extending the blocklist
-
-Add domains to `app/src/main/assets/blocklist.txt` (one domain per line, or
-`url:` prefix for substring URL rules), or enable auto-updates to pull the
-full StevenBlack list (~100k rules) weekly.
+- Menu -> update unsafe-site lists, toggle auto-updates, clear data, wipe on exit.
 
 ## Releasing
 
@@ -91,11 +93,14 @@ hiding it - honesty beats marketing. That means:
 
 ## Security notes / known limitations
 
-- The rendering engine is Android's WebView (Chromium/Blink), patched by
-  Google Play System Updates. Provito does not bundle its own engine.
-- Blocklist and unsafe-site downloads are plain anonymous HTTPS GETs; there is
-  no cryptographic signature on the list content (a compromised source could
+- The rendering engine is **GeckoView 140 (Firefox ESR)**, bundled in the APK,
+  so pages render with Mozilla's engine rather than the device's WebView.
+- The APK is large (~150 MB) because it contains the engine and two ABIs.
+- Unsafe-site downloads are plain anonymous HTTPS GETs; there is no
+  cryptographic signature on the list content (a compromised source could
   inject bad rules, but cannot execute code).
+- Provito's own pages use `provito://` navigation instead of a JavaScript
+  bridge, so no JS interface is exposed to web content.
 - Update APKs are downloaded from GitHub Releases over HTTPS and installed by
   Android, which rejects any APK not signed with Provito's release key. There
   is no extra in-app hash check.

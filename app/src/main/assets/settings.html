@@ -141,8 +141,8 @@
   <div class="card">
     <div class="row">
       <div class="info">
-        <div class="name">Block ads and trackers</div>
-        <div class="desc">Local rule engine with open-source blocklists. Third-party cookies are always blocked, regardless of this setting.</div>
+        <div class="name">Block trackers and ads</div>
+        <div class="desc">Gecko's strict tracking protection blocks trackers, cryptominers, fingerprinters and social trackers. Third-party cookies are always blocked.</div>
       </div>
       <label class="switch"><input type="checkbox" data-key="block_ads" checked><span class="track"></span></label>
     </div>
@@ -155,13 +155,6 @@
     </div>
     <div class="row">
       <div class="info">
-        <div class="name">Auto-update blocklists</div>
-        <div class="desc">Anonymous download of the open-source StevenBlack list (~100k rules). Off by default so the app makes no calls you did not ask for.</div>
-      </div>
-      <label class="switch"><input type="checkbox" data-key="auto_update_blocklists"><span class="track"></span></label>
-    </div>
-    <div class="row">
-      <div class="info">
         <div class="name" id="onion_name">Onion mode (route via Tor)</div>
         <div class="desc" id="onion_desc">Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app. Sites see a Tor exit IP, never yours.</div>
       </div>
@@ -171,8 +164,8 @@
 
   <div class="section-title">Tor</div>
   <div class="card">
-    <button class="action" onclick="Android.openOrbot(); return false;">Get Orbot (free, open source)</button>
-    <button class="action" onclick="Android.toast('Orbot check: ' + (Android.orbotRunning() ? 'running' : (Android.orbotInstalled() ? 'installed but not started' : 'not installed'))); return false;">Check Orbot status</button>
+    <button class="action" onclick="act('provito://act?name=orbot-install'); return false;">Get Orbot (free, open source)</button>
+    <button class="action" onclick="act('provito://act?name=orbot-status'); return false;">Check Orbot status</button>
   </div>
 
   <div class="section-title">Performance</div>
@@ -202,29 +195,37 @@
       </div>
       <label class="switch"><input type="checkbox" data-key="update_check_enabled" checked><span class="track"></span></label>
     </div>
-    <button class="action" onclick="Android.checkUpdatesNow(); return false;">Check for updates now</button>
-    <button class="action" onclick="Android.updateBlocklists(); return false;">Update blocklists now</button>
-    <button class="action" onclick="Android.updateUnsafeLists(); return false;">Update unsafe-site lists now</button>
+    <button class="action" onclick="act('provito://act?name=check-updates'); return false;">Check for updates now</button>
+    <button class="action" onclick="act('provito://act?name=unsafe-update'); return false;">Update unsafe-site lists now</button>
   </div>
 
   <div class="section-title">Data</div>
   <div class="card">
-    <button class="action" onclick="Android.clearBrowsingData(); return false;">Clear browsing data</button>
+    <button class="action" onclick="act('provito://act?name=wipe'); return false;">Clear browsing data</button>
   </div>
 
   <div class="about">
     Provito v<span id="ver"></span><br>
-    Blocked this session: <span id="blocked">0</span> - rules loaded: <span id="rules">0</span><br>
-    No accounts. No history. No telemetry. Honestly vibecoded.
+    Blocked this session: <span id="blocked">0</span><br>
+    Engine: GeckoView 140 (Firefox). No accounts. No history. No telemetry. Honestly vibecoded.
   </div>
 
+<iframe id="act" style="display:none"></iframe>
 <script>
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, function(c) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
+var params = new URLSearchParams(location.hash.slice(1));
 
+function q(k, d) {
+  var v = params.get(k);
+  return v === null ? d : v;
+}
+function flag(k, d) {
+  var v = q(k, d);
+  return v === '1' || v === 'true';
+}
+function act(url) {
+  var f = document.getElementById('act');
+  if (f) f.src = url;
+}
 function bindSwitch(key, value) {
   var el = document.querySelector('input[data-key="' + key + '"]');
   if (el) el.checked = value;
@@ -232,35 +233,33 @@ function bindSwitch(key, value) {
 
 document.querySelectorAll('input[data-key]').forEach(function(input) {
   input.addEventListener('change', function() {
-    Android.set(input.dataset.key, String(input.checked));
-    Android.toast('Saved');
+    act('provito://set?k=' + encodeURIComponent(input.dataset.key) +
+        '&v=' + (input.checked ? '1' : '0'));
   });
 });
 
 var engineSel = document.getElementById('engine');
-engineSel.value = Android.get('search_engine') || 'brave';
+engineSel.value = q('search', 'brave');
 engineSel.addEventListener('change', function() {
-  Android.set('search_engine', engineSel.value);
-  Android.toast('Search engine saved');
+  act('provito://set?k=search_engine&v=' + encodeURIComponent(engineSel.value));
 });
 
-bindSwitch('block_ads', Android.get('block_ads') !== 'false');
-bindSwitch('unload_tabs', Android.get('unload_tabs') !== 'false');
-bindSwitch('auto_ui_resize', Android.get('auto_ui_resize') !== 'false');
-bindSwitch('wipe_on_exit', Android.get('wipe_on_exit') !== 'false');
-bindSwitch('auto_update_blocklists', Android.get('auto_update_blocklists') === 'true');
-bindSwitch('onion_mode', Android.get('onion_mode') === 'true');
-bindSwitch('update_check_enabled', Android.get('update_check_enabled') !== 'false');
+bindSwitch('block_ads', flag('block', true));
+bindSwitch('unload_tabs', flag('unload', true));
+bindSwitch('auto_ui_resize', flag('resize', true));
+bindSwitch('wipe_on_exit', flag('wipe', true));
+bindSwitch('onion_mode', flag('onion', false));
+bindSwitch('update_check_enabled', flag('updchk', true));
 
 function onionStatusText() {
   var name = document.getElementById('onion_name');
   var desc = document.getElementById('onion_desc');
-  if (Android.orbotRunning()) {
-    name.textContent = 'Onion mode (Tor connected)';
-    desc.textContent = 'Orbot is running - new tabs are routed over Tor. Enable the toggle to activate.';
-  } else if (Android.orbotInstalled()) {
-    name.textContent = 'Onion mode (Orbot not started)';
-    desc.textContent = 'Orbot is installed but not connected. Open Orbot and connect, then enable this toggle.';
+  if (flag('onion', false)) {
+    name.textContent = 'Onion mode (enabled)';
+    desc.textContent = 'Traffic is routed over the Tor network through Orbot. If Orbot is not connected, pages will fail to load.';
+  } else if (q('orbot', '0') === '1') {
+    name.textContent = 'Onion mode (Orbot installed)';
+    desc.textContent = 'Orbot is installed. Connect it, then enable this toggle to route traffic over Tor.';
   } else {
     name.textContent = 'Onion mode (Orbot not installed)';
     desc.textContent = 'Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app.';
@@ -268,11 +267,10 @@ function onionStatusText() {
 }
 onionStatusText();
 
-var v = Android.version();
+var v = q('v', '');
 document.getElementById('version').textContent = 'Provito v' + v;
 document.getElementById('ver').textContent = v;
-document.getElementById('blocked').textContent = Android.blockedCount();
-document.getElementById('rules').textContent = Android.ruleCount();
+document.getElementById('blocked').textContent = q('blocked', '0');
 </script>
 </body>
 </html>

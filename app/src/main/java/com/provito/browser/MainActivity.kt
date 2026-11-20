@@ -1,31 +1,20 @@
 package com.provito.browser
 
-import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.webkit.CookieManager
-import android.webkit.GeolocationPermissions
-import android.webkit.JavascriptInterface
-import android.webkit.PermissionRequest
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebViewDatabase
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -33,12 +22,43 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import com.google.android.material.progressindicator.LinearProgressIndicator
-import java.io.ByteArrayInputStream
+import org.mozilla.geckoview.AllowOrDeny
+import org.mozilla.geckoview.ContentBlocking
+import org.mozilla.geckoview.GeckoResult
+import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.AlertPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.AuthPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.BeforeUnloadPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.ButtonPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.ChoicePrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.FilePrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.PopupPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.PromptResponse
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.RepostConfirmPrompt
+import org.mozilla.geckoview.GeckoSession.PromptDelegate.TextPrompt
+import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.StorageController
+import org.mozilla.geckoview.WebRequestError
+import org.mozilla.geckoview.WebResponse
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * Provito's browser shell.
+ *
+ * Rendering is done by GeckoView (Mozilla's Firefox engine), not by the
+ * system WebView. Every tab owns a private GeckoSession, so cookies, cache
+ * and storage are never shared with other apps and are dropped on exit.
+ *
+ * Provito's own pages (home / tabs / settings / warning) talk to the app
+ * through provito:// URLs rather than a JavaScript bridge, so no JavaScript
+ * interface is ever exposed to web content.
+ */
 class MainActivity : AppCompatActivity() {
 
     companion object {
@@ -48,7 +68,6 @@ class MainActivity : AppCompatActivity() {
         const val UNSAFE_PAGE = "file:///android_asset/unsafe.html"
         const val PREFS = "provito_prefs"
 
-        const val KEY_AUTO_UPDATE = "auto_update_blocklists"   // blocklist downloads
         const val KEY_WIPE_ON_EXIT = "wipe_on_exit"
         const val KEY_SEARCH_ENGINE = "search_engine"          // brave | duckduckgo | mojeek
         const val KEY_BLOCK_ADS = "block_ads"
@@ -56,21 +75,17 @@ class MainActivity : AppCompatActivity() {
         const val KEY_AUTO_UI_RESIZE = "auto_ui_resize"
 
         // RAM budget for tabs: ~1 GB. Tabs beyond the budget are unloaded
-        // (their WebView is destroyed; url + title are kept so they can be
-        // reopened instantly). Estimated at ~30 MB per loaded tab.
+        // (their GeckoSession is closed; url + title are kept so they can be
+        // reopened instantly). Estimated at ~40 MB per loaded tab.
         const val RAM_BUDGET_MB = 1024
-        const val MB_PER_TAB = 30
-
-        // Generic user agent: no device model, no app fingerprints.
-        const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 Provito/1.0"
+        const val MB_PER_TAB = 40
     }
 
-    private lateinit var blocker: Blocker
     private lateinit var unsafeSites: UnsafeSites
+    private lateinit var runtime: org.mozilla.geckoview.GeckoRuntime
 
     private lateinit var webContainer: FrameLayout
+    private lateinit var geckoView: GeckoView
     private lateinit var omnibox: EditText
     private lateinit var progress: LinearProgressIndicator
     private lateinit var txtBlocked: TextView
@@ -80,39 +95,50 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** A browser tab. When [webView] is null the tab is unloaded and only
+    /** A browser tab. When [session] is null the tab is unloaded and only
      *  its url/title (a few bytes) stay in RAM so it can be reopened. */
     inner class Tab(var url: String) {
-        var webView: WebView? = null
+        var session: GeckoSession? = null
         var title: String = "New tab"
         var lastUsed: Long = System.currentTimeMillis()
-        val isActive: Boolean get() = webView != null
-        val isOverlay: Boolean get() = url == TABS_PAGE || url == SETTINGS_PAGE
+        var canBack: Boolean = false
+        var canForward: Boolean = false
+        val isActive: Boolean get() = session != null
+        val isOverlay: Boolean
+            get() = url.startsWith(TABS_PAGE) ||
+                url.startsWith(SETTINGS_PAGE) ||
+                url.startsWith(UNSAFE_PAGE)
     }
 
     private val tabs = ArrayList<Tab>()
     private var current: Tab? = null
-    private val blockedTotal = java.util.concurrent.atomic.AtomicInteger(0)
+    private val blockedTotal = AtomicInteger(0)
+
+    private var pendingFilePrompt: FilePrompt? = null
+    private var pendingFileResult: GeckoResult<PromptResponse>? = null
+
+    private val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val prompt = pendingFilePrompt
+        val result = pendingFileResult
+        pendingFilePrompt = null
+        pendingFileResult = null
+        if (prompt == null || result == null) return@registerForActivityResult
+        result.complete(if (uri != null) prompt.confirm(this, arrayOf(uri)) else prompt.dismiss())
+    }
 
     // ---------- Responsive UI ----------
-    // The shell measures the window in dp and scales bars, text and touch
-    // targets so the UI stays proportional from phones up to tablets.
     private var uiScale = 1f
     private var insetTop = 0
     private var insetBottom = 0
     private var insetLeft = 0
     private var insetRight = 0
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        blocker = Blocker(this)
-        blocker.enabled = prefs.getBoolean(KEY_BLOCK_ADS, true)
-        // Parse blocklists off the main thread so the shell paints immediately.
-        blocker.loadAsync()
+        runtime = Engine.runtime(this)
         unsafeSites = UnsafeSites(this)
         unsafeSites.loadAsync()
 
@@ -124,29 +150,15 @@ class MainActivity : AppCompatActivity() {
         btnBack = findViewById(R.id.btnBack)
         btnForward = findViewById(R.id.btnForward)
 
-        // Warm up the cookie store off the main thread (it is a costly
-        // synchronous init that otherwise lands on startup).
-        Thread { CookieManager.getInstance().setAcceptCookie(true) }.start()
-
-        if (prefs.getBoolean(KEY_AUTO_UPDATE, false)) {
-            if (!blockerHostsFileExists()) {
-                Thread { if (blocker.downloadUpdatedList()) runOnUiThread { refreshShieldBadge() } }.start()
-            }
-            if (!unsafeDownloadExists()) {
-                Thread { unsafeSites.downloadAllSources() }.start()
-            }
+        if (prefs.getBoolean("auto_update_blocklists", false) && !unsafeDownloadExists()) {
+            Thread { unsafeSites.downloadAllSources() }.start()
         }
 
         wireChrome()
         wireOmnibox()
         setupResponsiveUi()
         val firstRun = !prefs.getBoolean(SetupView.KEY_SETUP_DONE, false)
-        val splashEnd: (() -> Unit)? = if (firstRun) {
-            { showSetup() }
-        } else {
-            null
-        }
-        addSplash(splashEnd)
+        addSplash(if (firstRun) ({ showSetup() }) else null)
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -155,21 +167,26 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        // Defer WebView creation until after the first frame - the native
-        // shell (omnibox + toolbar) is visible instantly. Proxy rules must
-        // be set before the first WebView exists.
+        geckoView = GeckoView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            // TextureView composites like a normal view, so the splash,
+            // setup wizard and dialogs render correctly above the page.
+            setViewBackend(GeckoView.BACKEND_TEXTURE_VIEW)
+            setBackgroundColor(Color.parseColor("#14141F"))
+            coverUntilFirstPaint(Color.parseColor("#14141F"))
+        }
+        webContainer.addView(geckoView)
+
         mainHandler.post {
-            ProxyManager.applyToWebView(this) {
+            ProxyManager.applyToGecko(this) { ok ->
                 runOnUiThread {
+                    if (!ok) toast("Proxy settings could not be applied")
                     val incoming = intent?.dataString
-                    if (incoming != null) {
-                        newTab(incoming)
-                    } else {
-                        newTab(HOME_URL)
-                    }
-                    if (!firstRun) {
-                        Updater.maybeCheck(this, automatic = true)
-                    }
+                    if (incoming != null) newTab(incoming) else newTab(HOME_URL)
+                    if (!firstRun) Updater.maybeCheck(this, automatic = true)
                 }
             }
         }
@@ -182,9 +199,6 @@ class MainActivity : AppCompatActivity() {
 
     fun getCurrentVersionName(): String = BuildConfig.VERSION_NAME
 
-    /** Startup animation overlay: shield, drawn check mark, logo slides
-     *  beside "Provito", fades out over the loaded app. Pure canvas view,
-     *  no startup cost, skipped if system animations are disabled. */
     private fun addSplash(onEnd: (() -> Unit)? = null) {
         val scale = android.provider.Settings.Global.getFloat(
             contentResolver,
@@ -207,11 +221,9 @@ class MainActivity : AppCompatActivity() {
         splash.post { splash.start() }
     }
 
-    /** First-run setup: slides up over the app once the splash ends. */
     private fun showSetup() {
         val setup = SetupView(this)
         setup.onFinished = {
-            blocker.enabled = prefs.getBoolean(KEY_BLOCK_ADS, true)
             Updater.maybeCheck(this, automatic = true)
         }
         (window.decorView as android.view.ViewGroup).addView(
@@ -226,7 +238,6 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Responsive UI engine ----------
 
-    /** Measures the window in dp and picks a scale tier for the shell. */
     private fun applyResponsiveUi() {
         val dm = resources.displayMetrics
         val wm = getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
@@ -243,15 +254,14 @@ class MainActivity : AppCompatActivity() {
         val auto = prefs.getBoolean(KEY_AUTO_UI_RESIZE, true)
         uiScale = when {
             !auto -> 1f
-            smallest >= 840f -> 1.5f   // large tablets / desktop-ish
-            smallest >= 720f -> 1.35f  // tablets
-            smallest >= 600f -> 1.2f   // small tablets / large foldables
-            else -> 1f                 // phones
+            smallest >= 840f -> 1.5f
+            smallest >= 720f -> 1.35f
+            smallest >= 600f -> 1.2f
+            else -> 1f
         }
         layoutShell()
     }
 
-    /** Applies scale + system insets to the native shell. */
     private fun layoutShell() {
         val d = resources.displayMetrics.density
         fun px(dp: Float) = (dp * uiScale * d).toInt()
@@ -281,7 +291,6 @@ class MainActivity : AppCompatActivity() {
         bottomBar.requestLayout()
     }
 
-    /** Keeps bars clear of status/nav bars, cutouts and the keyboard. */
     private fun setupResponsiveUi() {
         val types = androidx.core.view.WindowInsetsCompat.Type.systemBars() or
             androidx.core.view.WindowInsetsCompat.Type.displayCutout()
@@ -309,8 +318,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Fold/unfold, rotation, window resize (configChanges is declared in
-        // the manifest so the activity survives and just relayouts).
+        runCatching { runtime.configurationChanged(newConfig) }
         applyResponsiveUi()
     }
 
@@ -330,16 +338,13 @@ class MainActivity : AppCompatActivity() {
     // ---------- Unsafe-site shield ----------
 
     private fun warningUrl(target: String, level: String): String =
-        UNSAFE_PAGE + "?level=" + level + "&u=" + URLEncoder.encode(target, "UTF-8")
+        UNSAFE_PAGE + "#level=" + level + "&u=" + URLEncoder.encode(target, "UTF-8")
 
-    /** Returns the URL to actually load: target, or the warning page. */
     private fun loadTarget(tab: Tab, url: String) {
         tab.url = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
     }
 
     private fun loadInTab(tab: Tab, url: String) {
-        // Chrome pages opened via the omnibox must be proper overlay tabs
-        // so their JS bridges get attached.
         if (url == TABS_PAGE) {
             openTabsPage()
             return
@@ -348,102 +353,60 @@ class MainActivity : AppCompatActivity() {
             openSettingsPage()
             return
         }
-        // Never navigate an overlay tab in place: its WebView carries the
-        // JS bridge, and navigating it to web content would expose the
-        // bridge to that site. Open a fresh, bridge-free tab instead.
-        if (tab.isOverlay) {
-            newTab(url)
-            return
-        }
         val final = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
-        omnibox.setText(final)
-        tab.webView?.loadUrl(final)
+        tab.url = final
+        if (tab === current) omnibox.setText(displayUrl(final))
+        val session = tab.session
+        if (session != null) session.loadUri(final) else ensureLoaded(tab)
     }
 
     /** Waits (briefly, bounded) for the unsafe lists to finish parsing so
      *  the shield can't be raced on the very first navigation. */
     private fun loadWhenShieldReady(tab: Tab, url: String, attempts: Int = 0) {
-        val wv = tab.webView ?: return
+        val session = tab.session ?: return
         if (tab.url != url) return
         if (unsafeSites.isReady || attempts >= 10 || !url.startsWith("http")) {
             val final = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
             tab.url = final
-            wv.loadUrl(final)
-            if (tab === current) omnibox.setText(final)
+            session.loadUri(final)
+            if (tab === current) omnibox.setText(displayUrl(final))
             return
         }
         mainHandler.postDelayed({ loadWhenShieldReady(tab, url, attempts + 1) }, 200)
     }
 
-    private fun tabFor(view: WebView): Tab? =
-        synchronized(tabs) { tabs.firstOrNull { it.webView === view } }
-
     private fun unsafeDownloadExists(): Boolean =
         java.io.File(filesDir, UnsafeSites.DOWNLOAD_FILE).exists()
 
-    /** Creates (or recreates) the WebView backing a tab. */
-    @SuppressLint("SetJavaScriptEnabled")
+    /** Creates the private GeckoSession backing a tab. */
     private fun ensureLoaded(tab: Tab) {
-        if (tab.webView != null) return
-        val wv = WebView(this)
-        wv.layoutParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        val s = wv.settings
-        s.javaScriptEnabled = true
-        s.domStorageEnabled = true
-        s.databaseEnabled = false
-        s.setSupportMultipleWindows(true)
-        s.javaScriptCanOpenWindowsAutomatically = false
-        s.mediaPlaybackRequiresUserGesture = true
-        s.allowFileAccess = false
-        s.allowContentAccess = false
-        // Cached loads are dramatically faster on revisit; the cache is
-        // wiped on exit (see wipeBrowsingData) so nothing lingers.
-        s.cacheMode = WebSettings.LOAD_DEFAULT
-        s.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        s.saveFormData = false
-        @Suppress("DEPRECATION")
-        s.savePassword = false
-        s.userAgentString = USER_AGENT
+        if (tab.session != null) return
+        val settings = GeckoSessionSettings.Builder()
+            .usePrivateMode(true)
+            .useTrackingProtection(prefs.getBoolean(KEY_BLOCK_ADS, true))
+            .suspendMediaWhenInactive(true)
+            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
+            .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
+            .allowJavascript(true)
+            .build()
 
-        // No third-party cookies, ever.
-        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, false)
+        val session = GeckoSession(settings)
+        session.navigationDelegate = PrivacyNavigationDelegate(tab)
+        session.contentDelegate = PrivacyContentDelegate(tab)
+        session.progressDelegate = PrivacyProgressDelegate(tab)
+        session.permissionDelegate = PrivacyPermissionDelegate()
+        session.promptDelegate = PrivacyPromptDelegate()
+        session.contentBlockingDelegate = PrivacyContentBlockingDelegate()
+        tab.session = session
+        session.open(runtime)
 
-        wv.setDownloadListener { url, _, _, _, _ ->
-            try {
-                val req = DownloadManager.Request(Uri.parse(url))
-                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    .setTitle(Uri.parse(url).lastPathSegment ?: "download")
-                (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
-                Toast.makeText(this, "Download started", Toast.LENGTH_SHORT).show()
-            } catch (_: Exception) {
-                // ignore unsupported downloads
-            }
-        }
-
-        wv.webViewClient = PrivacyWebViewClient()
-        wv.webChromeClient = PrivacyChromeClient(wv)
-
-        // JS bridges only on Provito's own chrome pages - never exposed to
-        // websites. Both HTML pages call the interface as "Android".
-        if (tab.url == TABS_PAGE) {
-            wv.addJavascriptInterface(TabsBridge(), "Android")
-        }
-        if (tab.url == SETTINGS_PAGE) {
-            wv.addJavascriptInterface(SettingsBridge(), "Android")
-        }
-
-        tab.webView = wv
         if (tab.url.startsWith("http") && !unsafeSites.isReady) {
             loadWhenShieldReady(tab, tab.url)
         } else {
-            wv.loadUrl(tab.url)
+            session.loadUri(tab.url)
         }
     }
 
-    /** Estimated total tab RAM: ~30 MB per loaded tab, budget ~1 GB. */
     private fun activeTabCount(): Int = synchronized(tabs) { tabs.count { it.isActive } }
 
     private fun enforceTabBudget() {
@@ -451,8 +414,7 @@ class MainActivity : AppCompatActivity() {
         val budgetTabs = RAM_BUDGET_MB / MB_PER_TAB
         while (activeTabCount() > budgetTabs) {
             val victim = synchronized(tabs) {
-                tabs
-                    .filter { it.isActive && it !== current && !it.isOverlay }
+                tabs.filter { it.isActive && it !== current && !it.isOverlay }
                     .minByOrNull { it.lastUsed }
             } ?: break
             unloadTab(victim)
@@ -460,32 +422,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun unloadTab(tab: Tab) {
-        val wv = tab.webView ?: return
-        tab.url = wv.url ?: tab.url
-        tab.title = wv.title?.takeIf { it.isNotBlank() } ?: tab.title
-        tab.webView = null
-        synchronized(tabs) { if (!tabs.contains(tab)) tabs.add(tab) }
-        try {
-            wv.stopLoading()
-            wv.onPause()
-            if (wv.parent != null) webContainer.removeView(wv)
-            wv.removeAllViews()
-            wv.destroy()
-        } catch (_: Exception) {
-            // already torn down
+        val session = tab.session ?: return
+        if (tab === current) return
+        tab.session = null
+        runCatching { session.close() }
+    }
+
+    private fun closeTab(tab: Tab) {
+        synchronized(tabs) { tabs.remove(tab) }
+        val wasCurrent = current === tab
+        if (wasCurrent) {
+            current = null
+            runCatching { geckoView.releaseSession() }
+        }
+        tab.session?.let { runCatching { it.close() } }
+        tab.session = null
+        if (wasCurrent) {
+            val next = synchronized(tabs) { tabs.lastOrNull() }
+            if (next != null) switchTo(next) else newTab(HOME_URL)
         }
     }
 
     /** Destroys and recreates every loaded tab so proxy changes take effect. */
     private fun recreateAllTabs() {
         val snapshot = synchronized(tabs) { tabs.toList() }
-        for (t in snapshot) {
-            val wv = t.webView ?: continue
-            t.url = wv.url ?: t.url
-            t.title = wv.title?.takeIf { it.isNotBlank() } ?: t.title
+        runCatching { geckoView.releaseSession() }
+        for (tab in snapshot) {
+            tab.session?.let { runCatching { it.close() } }
+            tab.session = null
         }
-        webContainer.removeAllViews()
-        for (t in snapshot) unloadTab(t)
         val cur = current ?: snapshot.firstOrNull() ?: return
         ensureLoaded(cur)
         switchTo(cur)
@@ -494,62 +459,32 @@ class MainActivity : AppCompatActivity() {
     private fun switchTo(tab: Tab) {
         val previous = current
         if (previous != null && previous !== tab) {
-            // Pause background tabs: stops JS timers, video and audio from
-            // running in the background (privacy + battery + RAM).
-            previous.webView?.onPause()
+            previous.session?.setActive(false)
+            previous.session?.setFocused(false)
         }
         current = tab
         ensureLoaded(tab)
         tab.lastUsed = System.currentTimeMillis()
-        val wv = tab.webView
-        if (wv != null) {
-            wv.onResume()
-            webContainer.removeAllViews()
-            webContainer.addView(wv)
+        tab.session?.let { session ->
+            geckoView.setSession(session)
+            session.setActive(true)
+            session.setFocused(true)
         }
-        omnibox.setText(tab.url)
+        omnibox.setText(displayUrl(tab.url))
         omnibox.clearFocus()
         enforceTabBudget()
         updateNavButtons()
     }
 
-    private fun closeTab(tab: Tab) {
-        synchronized(tabs) { tabs.remove(tab) }
-        tab.webView?.let { wv ->
-            try {
-                wv.stopLoading()
-                wv.onPause()
-                wv.clearHistory()
-                wv.clearCache(true)
-                wv.clearSslPreferences()
-                wv.removeAllViews()
-                wv.destroy()
-            } catch (_: Exception) {
-                // already torn down
-            }
-        }
-        tab.webView = null
-        if (current === tab) {
-            current = null
-            val next = synchronized(tabs) { tabs.lastOrNull() }
-            if (next != null) switchTo(next) else {
-                webContainer.removeAllViews()
-                newTab(HOME_URL)
-            }
-        }
-    }
-
     private fun updateNavButtons() {
-        val tab = current
-        btnBack.alpha = if (tab?.webView?.canGoBack() == true) 1f else 0.35f
-        btnForward.alpha = if (tab?.webView?.canGoForward() == true) 1f else 0.35f
+        btnBack.alpha = if (current?.canBack == true) 1f else 0.35f
+        btnForward.alpha = if (current?.canForward == true) 1f else 0.35f
     }
 
     private fun handleBack() {
         val tab = current ?: run { finish(); return }
-        val wv = tab.webView
-        if (wv != null && wv.canGoBack()) {
-            wv.goBack()
+        if (tab.canBack) {
+            tab.session?.goBack()
         } else if (tab.isOverlay) {
             closeTab(tab)
         } else if (tabs.size > 1) {
@@ -559,260 +494,514 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- WebView clients, hardened for privacy ----------
+    // ---------- GeckoView delegates ----------
 
-    private inner class PrivacyWebViewClient : WebViewClient() {
+    private inner class PrivacyNavigationDelegate(private val tab: Tab) :
+        GeckoSession.NavigationDelegate {
 
-        override fun shouldInterceptRequest(
-            view: WebView,
-            request: WebResourceRequest
-        ): WebResourceResponse? {
-            val url = request.url.toString()
-            return if (blocker.shouldBlock(url)) {
-                blockedTotal.incrementAndGet()
-                runOnUiThread { refreshShieldBadge() }
-                emptyResponse()
-            } else {
-                null
-            }
-        }
-
-        override fun shouldOverrideUrlLoading(
-            view: WebView,
-            request: WebResourceRequest
-        ): Boolean {
-            val url = request.url
-            val scheme = url.scheme ?: return false
-
-            if (scheme == "http" || scheme == "https") {
-                // Unsafe-site shield: check every main-frame navigation.
-                if (request.isForMainFrame) {
-                    val level = unsafeSites.level(url.toString())
-                    if (level != null) {
-                        view.loadUrl(warningUrl(url.toString(), level))
-                        return true
-                    }
-                }
-                // Provito chrome pages never navigate in place: links open
-                // in a fresh (bridge-free) tab instead.
-                if ((view.url ?: "").startsWith("file:///android_asset/")) {
-                    runOnUiThread { newTab(url.toString()) }
-                    return true
-                }
-                return false
-            }
-
-            // Provito internal actions.
-            if (scheme == "provito") {
-                // SECURITY: only Provito's own warning page may trigger these
-                // actions. Otherwise any website could navigate to
-                // provito://unsafe-continue?u=... and whitelist itself.
-                val fromWarningPage = (view.url ?: "").startsWith(UNSAFE_PAGE)
-                if (!fromWarningPage) return true
-
-                when (url.host) {
-                    "unsafe-continue" -> {
-                        val target = try {
-                            url.getQueryParameter("u")
-                        } catch (_: Exception) {
-                            null
-                        }
-                        if (target != null) {
-                            unsafeSites.allowSession(target)
-                            runOnUiThread {
-                                val warningTab = tabFor(view)
-                                newTab(target)
-                                warningTab?.let { closeTab(it) }
-                            }
-                        }
-                    }
-                    "home" -> {
-                        runOnUiThread {
-                            val warningTab = tabFor(view)
-                            newTab(HOME_URL)
-                            warningTab?.let { closeTab(it) }
-                        }
-                    }
-                }
-                return true
-            }
-
-            // Non-web scheme (mailto:, tel:, app links...) -> hand to the system.
-            return try {
-                startActivity(
-                    Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-                true
-            } catch (_: Exception) {
-                true
-            }
-        }
-
-        override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-            super.onPageStarted(view, url, favicon)
-            // Backstop: catches JS redirects and any navigation that slipped
-            // past the client checks.
-            val level = unsafeSites.level(url)
-            if (level != null) {
-                view.stopLoading()
-                view.loadUrl(warningUrl(url, level))
-                return
-            }
-            if (view == current?.webView) omnibox.setText(url)
-            progress.show()
-            progress.setIndeterminate(true)
-            updateNavButtons()
-        }
-
-        override fun onPageFinished(view: WebView, url: String) {
-            super.onPageFinished(view, url)
-            val tab = tabFor(view)
-            if (tab != null) {
-                tab.title = view.title?.takeIf { it.isNotBlank() } ?: tab.title
-            }
-            if (view == current?.webView) {
-                omnibox.setText(url)
-                view.requestFocus()
-            }
-            progress.hide()
-            updateNavButtons()
-        }
-
-        override fun onReceivedError(
-            view: WebView,
-            request: WebResourceRequest,
-            error: WebResourceError
+        override fun onLocationChange(
+            session: GeckoSession,
+            url: String?,
+            perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
+            hasUserGesture: Boolean
         ) {
-            if (request.isForMainFrame) {
+            if (url == null) return
+            tab.url = url
+            if (tab === current && !omnibox.hasFocus()) omnibox.setText(displayUrl(url))
+        }
+
+        override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+            tab.canBack = canGoBack
+            if (tab === current) updateNavButtons()
+        }
+
+        override fun onCanGoForward(session: GeckoSession, canGoForward: Boolean) {
+            tab.canForward = canGoForward
+            if (tab === current) updateNavButtons()
+        }
+
+        override fun onLoadRequest(
+            session: GeckoSession,
+            request: GeckoSession.NavigationDelegate.LoadRequest
+        ): GeckoResult<AllowOrDeny>? = handleRequest(tab, request, subframe = false)
+
+        override fun onSubframeLoadRequest(
+            session: GeckoSession,
+            request: GeckoSession.NavigationDelegate.LoadRequest
+        ): GeckoResult<AllowOrDeny>? = handleRequest(tab, request, subframe = true)
+
+        override fun onNewSession(
+            session: GeckoSession,
+            uri: String
+        ): GeckoResult<GeckoSession>? {
+            val tab = newTab(uri)
+            return tab.session?.let { GeckoResult.fromValue(it) }
+        }
+
+        override fun onLoadError(
+            session: GeckoSession,
+            uri: String?,
+            error: WebRequestError
+        ): GeckoResult<String>? {
+            if (tab === current) {
                 progress.hide()
+                updateNavButtons()
+            }
+            return null
+        }
+    }
+
+    private fun handleRequest(
+        tab: Tab,
+        request: GeckoSession.NavigationDelegate.LoadRequest,
+        subframe: Boolean
+    ): GeckoResult<AllowOrDeny> {
+        val raw = request.uri
+        val uri = Uri.parse(raw)
+        val scheme = uri.scheme?.lowercase().orEmpty()
+
+        if (scheme == "provito") {
+            handleProvitoAction(tab, uri)
+            return GeckoResult.deny()
+        }
+
+        // target=_blank / window.open: GeckoView asks for a new session.
+        if (!subframe && request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) {
+            return GeckoResult.allow()
+        }
+
+        if (scheme == "http" || scheme == "https") {
+            if (!subframe) {
+                val level = unsafeSites.level(raw)
+                if (level != null) {
+                    tab.session?.loadUri(warningUrl(raw, level))
+                    return GeckoResult.deny()
+                }
+            }
+            return GeckoResult.allow()
+        }
+
+        if (scheme == "file") {
+            return if (raw.startsWith("file:///android_asset/")) {
+                GeckoResult.allow()
+            } else {
+                GeckoResult.deny()
+            }
+        }
+        if (scheme == "about" || scheme == "data" || scheme == "blob") {
+            return GeckoResult.allow()
+        }
+
+        // Unknown / external scheme: hand to the system, main frame only.
+        if (subframe) return GeckoResult.deny()
+        return try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            GeckoResult.deny()
+        } catch (_: Exception) {
+            GeckoResult.deny()
+        }
+    }
+
+    private fun handleProvitoAction(tab: Tab, uri: Uri) {
+        val here = tab.url
+        when (uri.host) {
+            "unsafe-continue" -> {
+                if (!here.startsWith(UNSAFE_PAGE)) return
+                val target = uri.getQueryParameter("u") ?: return
+                unsafeSites.allowSession(target)
+                tab.url = target
+                tab.session?.loadUri(target)
+            }
+            "home" -> {
+                if (!here.startsWith(UNSAFE_PAGE) &&
+                    !here.startsWith(SETTINGS_PAGE) &&
+                    !here.startsWith(TABS_PAGE)
+                ) return
+                loadInTab(tab, HOME_URL)
+            }
+            "set" -> {
+                if (!here.startsWith(SETTINGS_PAGE)) return
+                val key = uri.getQueryParameter("k") ?: return
+                val value = uri.getQueryParameter("v") ?: return
+                applySetting(key, value)
+            }
+            "act" -> {
+                if (!here.startsWith(SETTINGS_PAGE)) return
+                runSettingAction(uri.getQueryParameter("name") ?: return)
+            }
+            "tab" -> {
+                if (!here.startsWith(TABS_PAGE)) return
+                handleTabAction(tab, uri)
             }
         }
     }
 
-    private var popupTempWebView: WebView? = null
+    private inner class PrivacyContentDelegate(private val tab: Tab) :
+        GeckoSession.ContentDelegate {
 
-    private inner class PrivacyChromeClient(private val owner: WebView) : WebChromeClient() {
-
-        override fun onCreateWindow(
-            view: WebView,
-            isDialog: Boolean,
-            isUserGesture: Boolean,
-            resultMsg: android.os.Message
-        ): Boolean {
-            // Intercept target=_blank: open it as a new Provito tab (popup-safe).
-            popupTempWebView?.destroy()
-            val hv = WebView(this@MainActivity)
-            popupTempWebView = hv
-            hv.webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(
-                    v: WebView,
-                    request: WebResourceRequest
-                ): Boolean {
-                    runOnUiThread {
-                        newTab(request.url.toString())
-                        popupTempWebView?.destroy()
-                        popupTempWebView = null
-                    }
-                    return true
-                }
-            }
-            (resultMsg.obj as? WebView.WebViewTransport)?.setWebView(hv)
-            resultMsg.sendToTarget()
-            return true
+        override fun onTitleChange(session: GeckoSession, title: String?) {
+            if (!title.isNullOrBlank()) tab.title = title
         }
 
-        override fun onProgressChanged(view: WebView, newProgress: Int) {
-            if (view != owner) return
-            if (newProgress < 100) {
+        override fun onCloseRequest(session: GeckoSession) {
+            closeTab(tab)
+        }
+
+        override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
+            val uri = Uri.parse(response.uri)
+            val scheme = uri.scheme?.lowercase()
+            if (scheme == "http" || scheme == "https") {
+                try {
+                    val request = DownloadManager.Request(uri)
+                        .setNotificationVisibility(
+                            DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                        )
+                        .setTitle(uri.lastPathSegment ?: "download")
+                    (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager)
+                        .enqueue(request)
+                    toast("Download started")
+                } catch (_: Exception) {
+                    // ignore unsupported downloads
+                }
+            }
+            runCatching { response.body?.close() }
+        }
+
+        override fun onCrash(session: GeckoSession) = sessionDied(tab, "Tab crashed")
+
+        override fun onKill(session: GeckoSession) = sessionDied(tab, "Tab stopped")
+    }
+
+    private fun sessionDied(tab: Tab, message: String) {
+        if (tab.session == null) return
+        toast(message)
+        tab.session = null
+        if (tab === current) {
+            val next = synchronized(tabs) {
+                tabs.firstOrNull { it !== tab && it.session != null }
+            }
+            if (next != null) switchTo(next) else newTab(HOME_URL)
+        }
+    }
+
+    private inner class PrivacyProgressDelegate(private val tab: Tab) :
+        GeckoSession.ProgressDelegate {
+
+        override fun onPageStart(session: GeckoSession, url: String) {
+            if (tab === current) {
+                progress.show()
+                progress.setIndeterminate(true)
+            }
+        }
+
+        override fun onProgressChange(session: GeckoSession, newProgress: Int) {
+            if (tab !== current) return
+            if (newProgress in 1..99) {
                 progress.show()
                 progress.setIndeterminate(false)
                 progress.setProgressCompat(newProgress, true)
-            } else {
+            } else if (newProgress >= 100) {
                 progress.hide()
             }
         }
 
-        // Deny all sensitive permissions - maximum privacy.
-        override fun onGeolocationPermissionsShowPrompt(
-            origin: String,
-            callback: GeolocationPermissions.Callback
-        ) = callback.invoke(origin, false, false)
-
-        override fun onPermissionRequest(request: PermissionRequest) = request.deny()
-
-        override fun onJsAlert(
-            view: WebView,
-            url: String,
-            message: String,
-            result: android.webkit.JsResult
-        ): Boolean {
-            AlertDialog.Builder(this@MainActivity)
-                .setMessage(message)
-                .setPositiveButton("OK") { _, _ -> result.confirm() }
-                .setOnCancelListener { result.cancel() }
-                .show()
-            return true
-        }
-
-        override fun onJsConfirm(
-            view: WebView,
-            url: String,
-            message: String,
-            result: android.webkit.JsResult
-        ): Boolean {
-            AlertDialog.Builder(this@MainActivity)
-                .setMessage(message)
-                .setPositiveButton("OK") { _, _ -> result.confirm() }
-                .setNegativeButton("Cancel") { _, _ -> result.cancel() }
-                .setOnCancelListener { result.cancel() }
-                .show()
-            return true
+        override fun onPageStop(session: GeckoSession, success: Boolean) {
+            if (tab === current) {
+                progress.hide()
+                updateNavButtons()
+            }
         }
     }
 
-    private fun emptyResponse(): WebResourceResponse =
-        WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+    private inner class PrivacyPermissionDelegate : GeckoSession.PermissionDelegate {
+
+        override fun onContentPermissionRequest(
+            session: GeckoSession,
+            perm: GeckoSession.PermissionDelegate.ContentPermission
+        ): GeckoResult<Int> =
+            GeckoResult.fromValue(GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY)
+
+        override fun onMediaPermissionRequest(
+            session: GeckoSession,
+            uri: String,
+            video: Array<GeckoSession.PermissionDelegate.MediaSource>?,
+            audio: Array<GeckoSession.PermissionDelegate.MediaSource>?,
+            callback: GeckoSession.PermissionDelegate.MediaCallback
+        ) = callback.reject()
+
+        override fun onAndroidPermissionsRequest(
+            session: GeckoSession,
+            permissions: Array<String>?,
+            callback: GeckoSession.PermissionDelegate.Callback
+        ) = callback.reject()
+    }
+
+    private inner class PrivacyPromptDelegate : GeckoSession.PromptDelegate {
+
+        override fun onAlertPrompt(
+            session: GeckoSession,
+            prompt: AlertPrompt
+        ): GeckoResult<PromptResponse> {
+            val result = GeckoResult<PromptResponse>()
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(prompt.title)
+                .setMessage(prompt.message)
+                .setPositiveButton("OK") { _, _ -> result.complete(prompt.dismiss()) }
+                .setOnCancelListener { result.complete(prompt.dismiss()) }
+                .show()
+            return result
+        }
+
+        override fun onButtonPrompt(
+            session: GeckoSession,
+            prompt: ButtonPrompt
+        ): GeckoResult<PromptResponse> {
+            val result = GeckoResult<PromptResponse>()
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(prompt.title)
+                .setMessage(prompt.message)
+                .setPositiveButton("OK") { _, _ -> result.complete(prompt.confirm(0)) }
+                .setNegativeButton("Cancel") { _, _ -> result.complete(prompt.dismiss()) }
+                .setOnCancelListener { result.complete(prompt.dismiss()) }
+                .show()
+            return result
+        }
+
+        override fun onTextPrompt(
+            session: GeckoSession,
+            prompt: TextPrompt
+        ): GeckoResult<PromptResponse> {
+            val result = GeckoResult<PromptResponse>()
+            val input = EditText(this@MainActivity).apply {
+                setText(prompt.defaultValue ?: "")
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(prompt.title)
+                .setMessage(prompt.message)
+                .setView(input)
+                .setPositiveButton("OK") { _, _ ->
+                    result.complete(prompt.confirm(input.text.toString()))
+                }
+                .setNegativeButton("Cancel") { _, _ -> result.complete(prompt.dismiss()) }
+                .setOnCancelListener { result.complete(prompt.dismiss()) }
+                .show()
+            return result
+        }
+
+        override fun onChoicePrompt(
+            session: GeckoSession,
+            prompt: ChoicePrompt
+        ): GeckoResult<PromptResponse> {
+            val result = GeckoResult<PromptResponse>()
+            val labels = prompt.choices.map { it.label ?: "" }.toTypedArray()
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(prompt.title)
+                .setMessage(prompt.message)
+                .setItems(labels) { _, which ->
+                    result.complete(prompt.confirm(prompt.choices[which]))
+                }
+                .setOnCancelListener { result.complete(prompt.dismiss()) }
+                .show()
+            return result
+        }
+
+        override fun onAuthPrompt(
+            session: GeckoSession,
+            prompt: AuthPrompt
+        ): GeckoResult<PromptResponse> {
+            val result = GeckoResult<PromptResponse>()
+            val column = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(56, 16, 56, 0)
+            }
+            val user = EditText(this@MainActivity).apply {
+                hint = "Username"
+                setText(prompt.authOptions.username ?: "")
+            }
+            val pass = EditText(this@MainActivity).apply {
+                hint = "Password"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            column.addView(user)
+            column.addView(pass)
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(prompt.title ?: "Sign in")
+                .setMessage(prompt.message)
+                .setView(column)
+                .setPositiveButton("Sign in") { _, _ ->
+                    result.complete(
+                        prompt.confirm(user.text.toString(), pass.text.toString())
+                    )
+                }
+                .setNegativeButton("Cancel") { _, _ -> result.complete(prompt.dismiss()) }
+                .setOnCancelListener { result.complete(prompt.dismiss()) }
+                .show()
+            return result
+        }
+
+        override fun onBeforeUnloadPrompt(
+            session: GeckoSession,
+            prompt: BeforeUnloadPrompt
+        ): GeckoResult<PromptResponse> =
+            GeckoResult.fromValue(prompt.confirm(AllowOrDeny.ALLOW))
+
+        override fun onRepostConfirmPrompt(
+            session: GeckoSession,
+            prompt: RepostConfirmPrompt
+        ): GeckoResult<PromptResponse> =
+            GeckoResult.fromValue(prompt.dismiss())
+
+        override fun onPopupPrompt(
+            session: GeckoSession,
+            prompt: PopupPrompt
+        ): GeckoResult<PromptResponse> =
+            GeckoResult.fromValue(prompt.confirm(AllowOrDeny.ALLOW))
+
+        override fun onFilePrompt(
+            session: GeckoSession,
+            prompt: FilePrompt
+        ): GeckoResult<PromptResponse> {
+            pendingFileResult?.complete(pendingFilePrompt?.dismiss() ?: prompt.dismiss())
+            val result = GeckoResult<PromptResponse>()
+            pendingFilePrompt = prompt
+            pendingFileResult = result
+            val types = prompt.mimeTypes
+                ?.filter { it.isNotBlank() }
+                ?.toTypedArray()
+                ?.takeIf { it.isNotEmpty() }
+                ?: arrayOf("*/*")
+            return try {
+                filePicker.launch(types)
+                result
+            } catch (_: Throwable) {
+                pendingFilePrompt = null
+                pendingFileResult = null
+                GeckoResult.fromValue(prompt.dismiss())
+            }
+        }
+    }
+
+    private inner class PrivacyContentBlockingDelegate : ContentBlocking.Delegate {
+        override fun onContentBlocked(session: GeckoSession, event: ContentBlocking.BlockEvent) {
+            blockedTotal.incrementAndGet()
+            refreshShieldBadge()
+        }
+    }
 
     // ---------- UI wiring ----------
+
+    private fun displayUrl(url: String): String = when {
+        url.startsWith(TABS_PAGE) -> "provito://tabs"
+        url.startsWith(SETTINGS_PAGE) -> "provito://settings"
+        url.startsWith(UNSAFE_PAGE) -> "Blocked site"
+        else -> url
+    }
+
+    private fun displayTitle(tab: Tab): String = when {
+        tab.url.startsWith(TABS_PAGE) -> "Tabs"
+        tab.url.startsWith(SETTINGS_PAGE) -> "Settings"
+        tab.url.startsWith(UNSAFE_PAGE) -> "Blocked site"
+        else -> tab.title.ifBlank { "New tab" }
+    }
 
     private fun wireChrome() {
         findViewById<ImageButton>(R.id.btnShield).setOnClickListener { showPrivacyStats() }
         findViewById<ImageButton>(R.id.btnBack).setOnClickListener {
-            current?.webView?.goBack()
+            current?.session?.goBack()
         }
         findViewById<ImageButton>(R.id.btnForward).setOnClickListener {
-            current?.webView?.goForward()
+            current?.session?.goForward()
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener {
-            current?.webView?.loadUrl(HOME_URL)
+            val tab = current ?: return@setOnClickListener
+            if (tab.isOverlay) newTab(HOME_URL) else loadInTab(tab, HOME_URL)
         }
         findViewById<ImageButton>(R.id.btnRefresh).setOnClickListener {
-            current?.webView?.reload()
+            current?.session?.reload()
         }
         findViewById<ImageButton>(R.id.btnTabs).setOnClickListener { openTabsPage() }
-        findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu(it as ImageButton) }
+        findViewById<ImageButton>(R.id.btnMenu).setOnClickListener {
+            showMenu(it as ImageButton)
+        }
     }
 
     private fun openTabsPage() {
-        // If we are already on the tabs page just refresh it.
-        if (current?.url == TABS_PAGE) {
-            current?.webView?.reload()
+        val cur = current
+        if (cur != null && cur.url.startsWith(TABS_PAGE)) {
+            refreshTabsOverlay()
             return
         }
-        newTab(TABS_PAGE)
+        if (cur != null && cur.isOverlay) closeTab(cur)
+        newTab(tabsUrl())
     }
 
     private fun openSettingsPage() {
-        if (current?.url == SETTINGS_PAGE) {
-            current?.webView?.reload()
+        val cur = current
+        if (cur != null && cur.url.startsWith(SETTINGS_PAGE)) {
+            refreshSettingsOverlay()
             return
         }
-        newTab(SETTINGS_PAGE)
+        if (cur != null && cur.isOverlay) closeTab(cur)
+        newTab(settingsUrl())
+    }
+
+    private fun tabsUrl(): String {
+        val array = org.json.JSONArray()
+        synchronized(tabs) {
+            tabs.forEachIndexed { index, tab ->
+                if (tab.url.startsWith(TABS_PAGE)) return@forEachIndexed
+                val item = org.json.JSONObject()
+                item.put("id", index)
+                item.put("title", displayTitle(tab))
+                item.put("url", displayUrl(tab.url))
+                item.put("unloaded", tab.session == null)
+                item.put("current", tab === current)
+                array.put(item)
+            }
+        }
+        return TABS_PAGE + "#data=" + URLEncoder.encode(array.toString(), "UTF-8")
+    }
+
+    private fun settingsUrl(): String {
+        val hash = StringBuilder()
+        fun add(key: String, value: Any) {
+            if (hash.isNotEmpty()) hash.append('&')
+            hash.append(key).append('=').append(URLEncoder.encode(value.toString(), "UTF-8"))
+        }
+        add("v", BuildConfig.VERSION_NAME)
+        add("search", prefs.getString(KEY_SEARCH_ENGINE, "brave") ?: "brave")
+        add("block", if (prefs.getBoolean(KEY_BLOCK_ADS, true)) 1 else 0)
+        add("wipe", if (prefs.getBoolean(KEY_WIPE_ON_EXIT, true)) 1 else 0)
+        add("unload", if (prefs.getBoolean(KEY_UNLOAD_TABS, true)) 1 else 0)
+        add("resize", if (prefs.getBoolean(KEY_AUTO_UI_RESIZE, true)) 1 else 0)
+        add("onion", if (prefs.getBoolean(ProxyManager.KEY_ONION_MODE, false)) 1 else 0)
+        add("updchk", if (Updater.isEnabled(this)) 1 else 0)
+        add("blocked", blockedTotal.get())
+        add("orbot", if (ProxyManager.isOrbotInstalled(this)) 1 else 0)
+        return SETTINGS_PAGE + "#" + hash
+    }
+
+    private fun refreshTabsOverlay() {
+        val tab = current ?: return
+        if (!tab.url.startsWith(TABS_PAGE)) return
+        val url = tabsUrl()
+        tab.url = url
+        tab.session?.loadUri(url)
+    }
+
+    private fun refreshSettingsOverlay() {
+        val tab = current ?: return
+        if (!tab.url.startsWith(SETTINGS_PAGE)) return
+        val url = settingsUrl()
+        tab.url = url
+        tab.session?.loadUri(url)
     }
 
     private fun wireOmnibox() {
         omnibox.setOnFocusChangeListener { _, focused ->
-            if (!focused) current?.url?.let { omnibox.setText(it) }
+            if (!focused) current?.let { omnibox.setText(displayUrl(it.url)) }
             else omnibox.post { omnibox.selectAll() }
         }
         omnibox.setOnEditorActionListener { _, actionId, _ ->
@@ -866,13 +1055,143 @@ class MainActivity : AppCompatActivity() {
         imm.hideSoftInputFromWindow(omnibox.windowToken, 0)
     }
 
+    // ---------- Settings and tabs page actions ----------
+
+    private fun parseBool(value: String): Boolean? = when (value) {
+        "1", "true", "TRUE" -> true
+        "0", "false", "FALSE" -> false
+        else -> null
+    }
+
+    private fun applySetting(key: String, value: String) {
+        val editor = prefs.edit()
+        when (key) {
+            KEY_SEARCH_ENGINE -> {
+                if (value !in setOf("brave", "duckduckgo", "mojeek")) return
+                editor.putString(KEY_SEARCH_ENGINE, value)
+            }
+            KEY_BLOCK_ADS -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(KEY_BLOCK_ADS, enabled)
+                synchronized(tabs) {
+                    tabs.forEach { it.session?.settings?.useTrackingProtection = enabled }
+                }
+            }
+            KEY_UNLOAD_TABS -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(KEY_UNLOAD_TABS, enabled)
+                if (enabled) enforceTabBudget()
+            }
+            KEY_AUTO_UI_RESIZE -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(KEY_AUTO_UI_RESIZE, enabled)
+                applyResponsiveUi()
+            }
+            KEY_WIPE_ON_EXIT -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(KEY_WIPE_ON_EXIT, enabled)
+            }
+            Updater.PREF_UPDATE_CHECK -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(Updater.PREF_UPDATE_CHECK, enabled)
+            }
+            ProxyManager.KEY_ONION_MODE -> {
+                val enabled = parseBool(value) ?: return
+                editor.putBoolean(ProxyManager.KEY_ONION_MODE, enabled)
+                editor.apply()
+                ProxyManager.applyToGecko(this) { ok ->
+                    runOnUiThread {
+                        when {
+                            !ok -> toast("Proxy settings could not be applied")
+                            enabled && !ProxyManager.isOrbotProxyUp() ->
+                                toast("Orbot is not running - start it, then reload tabs")
+                            else -> {
+                                recreateAllTabs()
+                                toast(
+                                    if (enabled) "Traffic now routed through Tor"
+                                    else "Proxy routing off"
+                                )
+                            }
+                        }
+                        refreshSettingsOverlay()
+                    }
+                }
+                return
+            }
+            else -> return
+        }
+        editor.apply()
+    }
+
+    private fun runSettingAction(name: String) {
+        when (name) {
+            "orbot-install" -> ProxyManager.openOrbot(this)
+            "orbot-status" -> Thread {
+                val installed = ProxyManager.isOrbotInstalled(this)
+                val running = ProxyManager.isOrbotProxyUp()
+                runOnUiThread {
+                    toast(
+                        "Orbot: " + when {
+                            running -> "running"
+                            installed -> "installed but not started"
+                            else -> "not installed"
+                        }
+                    )
+                }
+            }.start()
+            "check-updates" -> Updater.maybeCheck(this, automatic = false)
+            "unsafe-update" -> updateUnsafeLists()
+            "wipe" -> {
+                wipeBrowsingData()
+                toast("Browsing data cleared")
+            }
+        }
+    }
+
+    private fun handleTabAction(tab: Tab, uri: Uri) {
+        when (uri.getQueryParameter("op")) {
+            "select" -> {
+                val id = uri.getQueryParameter("id")?.toIntOrNull() ?: return
+                val target = synchronized(tabs) { tabs.getOrNull(id) } ?: return
+                if (tab !== target && tab.isOverlay) closeTab(tab)
+                switchTo(target)
+            }
+            "close" -> {
+                val id = uri.getQueryParameter("id")?.toIntOrNull() ?: return
+                val victim = synchronized(tabs) { tabs.getOrNull(id) } ?: return
+                closeTab(victim)
+                refreshTabsOverlay()
+            }
+            "new" -> {
+                if (tab.isOverlay) closeTab(tab)
+                newTab(HOME_URL)
+            }
+        }
+    }
+
+    private fun updateUnsafeLists() {
+        toast("Updating unsafe-site lists...")
+        Thread {
+            val okCount = unsafeSites.downloadAllSources()
+            runOnUiThread {
+                toast(
+                    if (okCount > 0) {
+                        "Updated $okCount/${UnsafeSites.SOURCES.size} lists " +
+                            "(malware: ${unsafeSites.malwareCount}, " +
+                            "phishing: ${unsafeSites.phishingCount})"
+                    } else {
+                        "Update failed - check connection"
+                    }
+                )
+            }
+        }.start()
+    }
+
     // ---------- Menu, privacy actions ----------
 
     private fun showMenu(anchor: ImageButton) {
         val menu = PopupMenu(this, anchor)
         menu.menuInflater.inflate(R.menu.main_menu, menu.menu)
-        menu.menu.findItem(R.id.action_auto_update).isChecked =
-            prefs.getBoolean(KEY_AUTO_UPDATE, false)
         menu.menu.findItem(R.id.action_wipe_on_exit).isChecked =
             prefs.getBoolean(KEY_WIPE_ON_EXIT, true)
         menu.menu.findItem(R.id.action_auto_update_check).isChecked = Updater.isEnabled(this)
@@ -884,9 +1203,7 @@ class MainActivity : AppCompatActivity() {
                     true
                 }
                 R.id.action_close_tab -> {
-                    current?.let {
-                        closeTab(it)
-                    }
+                    current?.let { closeTab(it) }
                     true
                 }
                 R.id.action_settings -> {
@@ -895,28 +1212,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 R.id.action_clear_data -> {
                     wipeBrowsingData()
-                    Toast.makeText(this, "Browsing data cleared", Toast.LENGTH_SHORT).show()
+                    toast("Browsing data cleared")
                     true
                 }
-                R.id.action_update_blocklists -> {
-                    Toast.makeText(this, "Updating blocklists...", Toast.LENGTH_SHORT).show()
-                    Thread {
-                        val ok = blocker.downloadUpdatedList()
-                        runOnUiThread {
-                            refreshShieldBadge()
-                            Toast.makeText(
-                                this,
-                                if (ok) "Blocklists updated (${blocker.hostCount} rules)"
-                                else "Update failed - check connection",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }.start()
-                    true
-                }
-                R.id.action_auto_update -> {
+                R.id.action_wipe_on_exit -> {
                     item.isChecked = !item.isChecked
-                    prefs.edit().putBoolean(KEY_AUTO_UPDATE, item.isChecked).apply()
+                    prefs.edit().putBoolean(KEY_WIPE_ON_EXIT, item.isChecked).apply()
                     true
                 }
                 R.id.action_check_update -> {
@@ -928,9 +1229,8 @@ class MainActivity : AppCompatActivity() {
                     Updater.setEnabled(this, item.isChecked)
                     true
                 }
-                R.id.action_wipe_on_exit -> {
-                    item.isChecked = !item.isChecked
-                    prefs.edit().putBoolean(KEY_WIPE_ON_EXIT, item.isChecked).apply()
+                R.id.action_update_unsafe -> {
+                    updateUnsafeLists()
                     true
                 }
                 R.id.action_about -> {
@@ -938,9 +1238,10 @@ class MainActivity : AppCompatActivity() {
                         .setTitle("Provito")
                         .setMessage(
                             "Private browser v${BuildConfig.VERSION_NAME}\n\n" +
-                                "Default search: Brave\n" +
-                                "Blocking: local rule engine + open-source lists\n\n" +
-                                "No accounts, no history, no telemetry, no third-party cookies.\n" +
+                                "Engine: GeckoView 140 (Mozilla Firefox)\n" +
+                                "Default search: Brave\n\n" +
+                                "No accounts, no history, no telemetry, " +
+                                "no third-party cookies.\n" +
                                 "Honestly vibecoded - see the README."
                         )
                         .setPositiveButton("OK", null)
@@ -957,15 +1258,16 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Privacy shield")
             .setMessage(
-                "Blocked since launch: ${blockedTotal.get()}\n" +
-                    "Loaded rules: ${blocker.hostCount}\n\n" +
+                "Blocked since launch: ${blockedTotal.get()}\n\n" +
+                    "Engine: GeckoView 140 (Firefox)\n\n" +
                     "Active protections:\n" +
-                    "- Ad and tracker blocking\n" +
+                    "- Strict tracking protection (trackers, cryptominers, " +
+                    "fingerprinters, social trackers)\n" +
+                    "- Safe Browsing for malware and phishing hosts\n" +
                     "- Third-party cookies blocked\n" +
                     "- Geolocation, camera and microphone denied\n" +
-                    "- Popups and silent window opens blocked\n" +
-                    "- No passwords, no form data saved\n" +
-                    "- Generic user agent, no device fingerprint"
+                    "- Private sessions: nothing written to disk\n" +
+                    "- Unsafe-site shield (six live lists)"
             )
             .setPositiveButton("OK", null)
             .show()
@@ -977,274 +1279,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun blockerHostsFileExists(): Boolean =
-        java.io.File(filesDir, "blocklist_download.txt").exists()
-
     private fun wipeBrowsingData() {
-        CookieManager.getInstance().apply {
-            removeAllCookies(null)
-            flush()
+        runCatching {
+            runtime.storageController.clearData(StorageController.ClearFlags.ALL)
         }
-        android.webkit.WebStorage.getInstance().deleteAllData()
-        WebViewDatabase.getInstance(this).clearFormData()
-        WebViewDatabase.getInstance(this).clearHttpAuthUsernamePassword()
-        synchronized(tabs) {
-            for (tab in tabs) {
-                tab.webView?.clearHistory()
-                tab.webView?.clearSslPreferences()
-                tab.webView?.clearCache(true)
-            }
-        }
+        blockedTotal.set(0)
+        refreshShieldBadge()
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     override fun onPause() {
         super.onPause()
-        current?.webView?.onPause()
+        current?.session?.setActive(false)
     }
 
     override fun onResume() {
         super.onResume()
-        current?.webView?.onResume()
-    }
-
-    // ---------- HTML chrome-page bridges ----------
-    // These interfaces are attached ONLY to Provito's own asset pages
-    // (tabs.html / settings.html), never to websites.
-
-    inner class SettingsBridge {
-        @JavascriptInterface
-        fun get(key: String): String = when (key) {
-            KEY_SEARCH_ENGINE -> prefs.getString(KEY_SEARCH_ENGINE, "brave") ?: "brave"
-            KEY_BLOCK_ADS -> prefs.getBoolean(KEY_BLOCK_ADS, true).toString()
-            KEY_UNLOAD_TABS -> prefs.getBoolean(KEY_UNLOAD_TABS, true).toString()
-            KEY_AUTO_UI_RESIZE -> prefs.getBoolean(KEY_AUTO_UI_RESIZE, true).toString()
-            KEY_WIPE_ON_EXIT -> prefs.getBoolean(KEY_WIPE_ON_EXIT, true).toString()
-            KEY_AUTO_UPDATE -> prefs.getBoolean(KEY_AUTO_UPDATE, false).toString()
-            ProxyManager.KEY_ONION_MODE -> prefs.getBoolean(ProxyManager.KEY_ONION_MODE, false).toString()
-            Updater.PREF_UPDATE_CHECK -> prefs.getBoolean(Updater.PREF_UPDATE_CHECK, true).toString()
-            else -> ""
-        }
-
-        @JavascriptInterface
-        fun set(key: String, value: String) {
-            val e = prefs.edit()
-            when (key) {
-                KEY_SEARCH_ENGINE -> e.putString(KEY_SEARCH_ENGINE, value)
-                KEY_BLOCK_ADS -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(KEY_BLOCK_ADS, b)
-                    blocker.enabled = b
-                }
-                KEY_UNLOAD_TABS -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(KEY_UNLOAD_TABS, b)
-                    if (b) runOnUiThread { enforceTabBudget() }
-                }
-                KEY_AUTO_UI_RESIZE -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(KEY_AUTO_UI_RESIZE, b)
-                    runOnUiThread { applyResponsiveUi() }
-                }
-                KEY_WIPE_ON_EXIT -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(KEY_WIPE_ON_EXIT, b)
-                }
-                KEY_AUTO_UPDATE -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(KEY_AUTO_UPDATE, b)
-                }
-                ProxyManager.KEY_ONION_MODE -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(ProxyManager.KEY_ONION_MODE, b)
-                    e.apply()
-                    ProxyManager.applyToWebView(this@MainActivity) { ok ->
-                        runOnUiThread {
-                            if (!ok) {
-                                toast("Proxying not supported on this WebView version")
-                            } else if (b && !ProxyManager.isOrbotProxyUp()) {
-                                toast("Orbot is not running - start it, then reload tabs")
-                            } else {
-                                recreateAllTabs()
-                                toast(
-                                    if (b) "Traffic now routed through Tor"
-                                    else "Proxy routing off"
-                                )
-                            }
-                        }
-                    }
-                    return
-                }
-                Updater.PREF_UPDATE_CHECK -> {
-                    val b = value.toBooleanStrictOrNull() ?: return
-                    e.putBoolean(Updater.PREF_UPDATE_CHECK, b)
-                }
-                else -> return
-            }
-            e.apply()
-        }
-
-        @JavascriptInterface
-        fun version(): String = BuildConfig.VERSION_NAME
-
-        @JavascriptInterface
-        fun blockedCount(): Int = blockedTotal.get()
-
-        @JavascriptInterface
-        fun ruleCount(): Int = blocker.hostCount
-
-        @JavascriptInterface
-        fun toast(message: String) {
-            runOnUiThread {
-                Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        @JavascriptInterface
-        fun checkUpdatesNow() {
-            runOnUiThread { Updater.maybeCheck(this@MainActivity, automatic = false) }
-        }
-
-        @JavascriptInterface
-        fun updateBlocklists() {
-            runOnUiThread {
-                Toast.makeText(this@MainActivity, "Updating blocklists...", Toast.LENGTH_SHORT).show()
-            }
-            Thread {
-                val ok = blocker.downloadUpdatedList()
-                runOnUiThread {
-                    refreshShieldBadge()
-                    toast(
-                        if (ok) "Blocklists updated (${blocker.hostCount} rules)"
-                        else "Update failed - check connection"
-                    )
-                }
-            }.start()
-        }
-
-        @JavascriptInterface
-        fun clearBrowsingData() {
-            runOnUiThread {
-                wipeBrowsingData()
-                toast("Browsing data cleared")
-            }
-        }
-
-        @JavascriptInterface
-        fun closePage() {
-            runOnUiThread {
-                current?.let { closeTab(it) }
-            }
-        }
-
-        @JavascriptInterface
-        fun updateUnsafeLists() {
-            runOnUiThread {
-                Toast.makeText(this@MainActivity, "Updating unsafe-site lists...", Toast.LENGTH_SHORT).show()
-            }
-            Thread {
-                val okCount = unsafeSites.downloadAllSources()
-                runOnUiThread {
-                    toast(
-                        if (okCount > 0) {
-                            "Updated $okCount/${UnsafeSites.SOURCES.size} lists " +
-                                "(malware: ${unsafeSites.malwareCount}, phishing: ${unsafeSites.phishingCount})"
-                        } else {
-                            "Update failed - check connection"
-                        }
-                    )
-                }
-            }.start()
-        }
-
-        @JavascriptInterface
-        fun orbotInstalled(): Boolean = ProxyManager.isOrbotInstalled(this@MainActivity)
-
-        @JavascriptInterface
-        fun orbotRunning(): Boolean = ProxyManager.isOrbotProxyUp()
-
-        @JavascriptInterface
-        fun openOrbot() {
-            runOnUiThread { ProxyManager.openOrbot(this@MainActivity) }
-        }
-    }
-
-    inner class TabsBridge {
-        private fun esc(s: String): String = buildString(s.length + 8) {
-            for (c in s) {
-                when (c) {
-                    '\\' -> append("\\\\")
-                    '"' -> append("\\\"")
-                    '\n' -> append("\\n")
-                    '\r' -> append("\\r")
-                    '\t' -> append("\\t")
-                    else -> if (c.code < 0x20) append(' ') else append(c)
-                }
-            }
-        }
-
-        private fun displayTitle(tab: Tab, raw: String?): String {
-            if (tab.url == TABS_PAGE) return "Tabs"
-            if (tab.url == SETTINGS_PAGE) return "Settings"
-            if (tab.url == UNSAFE_PAGE) return "Blocked site"
-            return raw?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "New tab" }
-        }
-
-        @JavascriptInterface
-        fun getTabs(): String = synchronized(tabs) {
-            val sb = StringBuilder("[")
-            for ((i, tab) in tabs.withIndex()) {
-                val wv = tab.webView
-                val title = displayTitle(tab, wv?.title)
-                val url = wv?.url ?: tab.url
-                sb.append("{\"id\":").append(i)
-                    .append(",\"title\":\"").append(esc(title))
-                    .append("\",\"url\":\"").append(esc(url))
-                    .append("\",\"unloaded\":").append(wv == null)
-                    .append(",\"current\":").append(tab === current)
-                    .append('}')
-                if (i != tabs.size - 1) sb.append(',')
-            }
-            sb.append(']').toString()
-        }
-
-        @JavascriptInterface
-        fun select(id: Int) {
-            runOnUiThread {
-                val target = synchronized(tabs) { tabs.getOrNull(id) } ?: return@runOnUiThread
-                val overlay = current
-                if (overlay != null && overlay.isOverlay) closeTab(overlay)
-                switchTo(target)
-            }
-        }
-
-        @JavascriptInterface
-        fun close(id: Int) {
-            runOnUiThread {
-                synchronized(tabs) { tabs.getOrNull(id) }?.let { closeTab(it) }
-            }
-        }
-
-        @JavascriptInterface
-        fun newTabFromUi() {
-            runOnUiThread {
-                current?.takeIf { it.isOverlay }?.let { closeTab(it) }
-                newTab(HOME_URL)
-            }
-        }
+        current?.session?.setActive(true)
     }
 
     override fun onDestroy() {
         val wipe = prefs.getBoolean(KEY_WIPE_ON_EXIT, true)
-        if (wipe) {
-            wipeBrowsingData()
-        }
+        if (wipe) wipeBrowsingData()
         Updater.cleanup(this)
-        popupTempWebView?.destroy()
-        popupTempWebView = null
+        runCatching { geckoView.releaseSession() }
         synchronized(tabs) {
             for (tab in tabs.toList()) {
-                tab.webView?.destroy()
-                tab.webView = null
+                tab.session?.let { runCatching { it.close() } }
+                tab.session = null
             }
             tabs.clear()
         }

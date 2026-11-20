@@ -13,12 +13,8 @@
         android:id="@+id/action_clear_data"
         android:title="Clear browsing data" />
     <item
-        android:id="@+id/action_update_blocklists"
-        android:title="Update blocklists now" />
-    <item
-        android:id="@+id/action_auto_update"
-        android:checkable="true"
-        android:title="Auto-update blocklists" />
+        android:id="@+id/action_update_unsafe"
+        android:title="Update unsafe-site lists" />
     <item
         android:id="@+id/action_wipe_on_exit"
         android:checkable="true"

@@ -18,6 +18,17 @@ android {
         versionCode = vName.split('.').fold(0) { acc, part ->
             (acc * 100) + (part.filter { it.isDigit() }.toIntOrNull() ?: 0)
         }
+        // GeckoView ships four ABIs; keep the two that phones actually use
+        // so the APK stays installable instead of ~300 MB.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 
     signingConfigs {
@@ -41,14 +52,10 @@ android {
             if (signed) {
                 signingConfig = signingConfigs.getByName("provito")
             }
-            isMinifyEnabled = signed
-            isShrinkResources = signed
-            if (signed) {
-                proguardFiles(
-                    getDefaultProguardFile("proguard-android-optimize.txt"),
-                    "proguard-rules.pro"
-                )
-            }
+            // GeckoView talks to its engine through JNI and reflection, so
+            // R8 is left off for now rather than risking a stripped class.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 
@@ -72,5 +79,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
-    implementation("androidx.webkit:webkit:1.11.0")
+    implementation("org.mozilla.geckoview:geckoview:140.0.20250707120347")
 }

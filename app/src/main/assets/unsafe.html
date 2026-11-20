@@ -88,7 +88,7 @@
   <p class="fine" id="fine"></p>
 
 <script>
-var params = new URLSearchParams(location.search);
+var params = new URLSearchParams(location.hash.slice(1));
 var level = params.get('level') || 'phishing';
 var target = params.get('u') || '';
 

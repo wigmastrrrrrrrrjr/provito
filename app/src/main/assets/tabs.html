@@ -113,18 +113,26 @@
   <h1>Open tabs</h1>
   <div class="sub" id="stat">Loading...</div>
   <div class="grid" id="grid"></div>
-  <div class="fab-wrap"><button class="fab" onclick="Android.newTabFromUi()">+ New tab</button></div>
+  <div class="fab-wrap"><button class="fab" onclick="act('provito://tab?op=new')">+ New tab</button></div>
 
+<iframe id="act" style="display:none"></iframe>
 <script>
+var params = new URLSearchParams(location.hash.slice(1));
+var tabs = [];
+try { tabs = JSON.parse(params.get('data') || '[]'); } catch (e) { tabs = []; }
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, function(c) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
   });
 }
 
+function act(url) {
+  var f = document.getElementById('act');
+  if (f) f.src = url;
+}
+
 function render() {
-  var tabs;
-  try { tabs = JSON.parse(Android.getTabs()); } catch (e) { tabs = []; }
   var grid = document.getElementById('grid');
   grid.innerHTML = '';
   var active = tabs.filter(function(t) { return !t.unloaded; }).length;
@@ -148,10 +156,10 @@ function render() {
       '<button class="x" data-id="' + t.id + '">&#10005;</button>';
     card.addEventListener('click', function(ev) {
       if (ev.target.classList.contains('x')) {
-        Android.close(t.id);
-        setTimeout(render, 80);
+        act('provito://tab?op=close&id=' + t.id);
+        setTimeout(render, 120);
       } else {
-        Android.select(t.id);
+        act('provito://tab?op=select&id=' + t.id);
       }
     });
     grid.appendChild(card);
