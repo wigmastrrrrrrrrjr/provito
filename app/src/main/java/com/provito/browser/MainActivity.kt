@@ -62,10 +62,10 @@ import java.util.concurrent.atomic.AtomicInteger
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        const val HOME_URL = "file:///android_asset/home.html"
-        const val TABS_PAGE = "file:///android_asset/tabs.html"
-        const val SETTINGS_PAGE = "file:///android_asset/settings.html"
-        const val UNSAFE_PAGE = "file:///android_asset/unsafe.html"
+        const val HOME_URL = "resource://android/assets/home.html"
+        const val TABS_PAGE = "resource://android/assets/tabs.html"
+        const val SETTINGS_PAGE = "resource://android/assets/settings.html"
+        const val UNSAFE_PAGE = "resource://android/assets/unsafe.html"
         const val PREFS = "provito_prefs"
 
         const val KEY_WIPE_ON_EXIT = "wipe_on_exit"
@@ -589,12 +589,17 @@ class MainActivity : AppCompatActivity() {
             return GeckoResult.allow()
         }
 
-        if (scheme == "file") {
-            return if (raw.startsWith("file:///android_asset/")) {
+        // GeckoView exposes APK assets at resource://android/assets/ (the
+        // WebView-only file:///android_asset/ path does not exist here).
+        if (scheme == "resource") {
+            return if (raw.startsWith("resource://android/assets/")) {
                 GeckoResult.allow()
             } else {
                 GeckoResult.deny()
             }
+        }
+        if (scheme == "file") {
+            return GeckoResult.deny()
         }
         if (scheme == "about" || scheme == "data" || scheme == "blob") {
             return GeckoResult.allow()
@@ -901,6 +906,7 @@ class MainActivity : AppCompatActivity() {
     // ---------- UI wiring ----------
 
     private fun displayUrl(url: String): String = when {
+        url.startsWith(HOME_URL) -> ""
         url.startsWith(TABS_PAGE) -> "provito://tabs"
         url.startsWith(SETTINGS_PAGE) -> "provito://settings"
         url.startsWith(UNSAFE_PAGE) -> "Blocked site"
