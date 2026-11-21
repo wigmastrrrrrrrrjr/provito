@@ -26,23 +26,57 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      - name: Build signed APK
+      - name: Build signed APKs
         env:
           PROVITO_KEYSTORE_B64: ${{ secrets.PROVITO_KEYSTORE_B64 }}
           PROVITO_STORE_PASS: ${{ secrets.PROVITO_STORE_PASS }}
           PROVITO_KEY_ALIAS: ${{ secrets.PROVITO_KEY_ALIAS }}
           PROVITO_KEY_PASS: ${{ secrets.PROVITO_KEY_PASS }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           gradle assembleRelease -PPROVITO_VERSION_NAME="$VERSION" --no-daemon
-          cp app/build/outputs/apk/release/app-release.apk "Provito-${VERSION}.apk"
+          mkdir -p dist
+          # arm64 first: pre-split (v2.0.0) updaters grab the first .apk asset.
+          for abi in arm64-v8a armeabi-v7a; do
+            src="app/build/outputs/apk/release/app-${abi}-release.apk"
+            test -f "$src"
+            cp "$src" "dist/Provito-${VERSION}-${abi}.apk"
+          done
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify APKs
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          APKSIGNER="$(ls "$SDK"/build-tools/*/apksigner | sort -V | tail -1)"
+          cd dist
+          for f in *.apk; do
+            echo "== $f ($(du -h "$f" | cut -f1))"
+            unzip -tq "$f"
+            "$APKSIGNER" verify --verbose "$f" | sed -n '1,6p'
+          done
+          sha256sum *.apk > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "Provito-${VERSION}.apk" \
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Provito-${VERSION}-arm64-v8a.apk" \
+            "dist/Provito-${VERSION}-armeabi-v7a.apk" \
+            "dist/SHA256SUMS" \
             --title "Provito v${VERSION}" \
             --generate-notes \
             --latest
+
+      - name: Verify uploaded assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify && cd verify
+          gh release download "$GITHUB_REF_NAME" -p '*.apk' -p 'SHA256SUMS' --clobber
+          sha256sum -c SHA256SUMS

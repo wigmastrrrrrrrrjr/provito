@@ -99,8 +99,7 @@ object Updater {
                 .trim()
                 .ifBlank { "Bug fixes and improvements." }
                 .let { if (it.length > 1500) it.take(1500) + "..." else it }
-            val apk = regexFind(text, "\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"")
-                ?: return null
+            val apk = pickApk(text) ?: return null
             ReleaseInfo(version, notes, apk)
         } catch (_: Exception) {
             null
@@ -110,6 +109,24 @@ object Updater {
     private fun regexFind(text: String, pattern: String): String? {
         val m = Regex(pattern).find(text) ?: return null
         return m.groupValues.getOrNull(1)
+    }
+
+    /**
+     * Releases ship one APK per ABI (arm64-v8a, armeabi-v7a). Pick the asset
+     * that matches the device, falling back to the first APK for older
+     * releases that shipped a single universal build.
+     */
+    private fun pickApk(text: String): String? {
+        val urls = Regex("\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"")
+            .findAll(text)
+            .map { it.groupValues[1] }
+            .toList()
+        if (urls.isEmpty()) return null
+        for (abi in Build.SUPPORTED_ABIS) {
+            urls.firstOrNull { it.contains("-$abi.apk") }?.let { return it }
+        }
+        val preferred = if (Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()) "arm64-v8a" else "armeabi-v7a"
+        return urls.firstOrNull { it.contains("-$preferred.apk") } ?: urls.first()
     }
 
     private fun unescape(s: String): String {

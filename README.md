@@ -52,7 +52,7 @@ platform 35.
 
 # or CLI:
 ./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
 ## Using it
@@ -71,8 +71,11 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-The workflow builds the APK with the tag as the version and publishes a
-GitHub release. The app then auto-detects it on next launch.
+The workflow builds one APK per ABI (arm64-v8a, armeabi-v7a) with the tag as
+the version, verifies each archive and signature, publishes them with a
+`SHA256SUMS` file, and re-downloads the assets to confirm they match. The app
+then auto-detects the release on next launch and downloads the APK matching the
+device's ABI.
 
 APKs are signed with a persistent release key stored as repo secrets
 (`PROVITO_KEYSTORE_B64` etc.) so Android accepts in-place updates between
@@ -95,15 +98,18 @@ hiding it - honesty beats marketing. That means:
 
 - The rendering engine is **GeckoView 140 (Firefox ESR)**, bundled in the APK,
   so pages render with Mozilla's engine rather than the device's WebView.
-- The APK is large (~150 MB) because it contains the engine and two ABIs.
+- APKs are large (arm64 ~190 MB, armv7 ~150 MB) because each bundles the
+  engine's native code. One APK per ABI is published; the updater picks the
+  matching one. `SHA256SUMS` is attached to every release.
 - Unsafe-site downloads are plain anonymous HTTPS GETs; there is no
   cryptographic signature on the list content (a compromised source could
   inject bad rules, but cannot execute code).
 - Provito's own pages use `provito://` navigation instead of a JavaScript
   bridge, so no JS interface is exposed to web content.
 - Update APKs are downloaded from GitHub Releases over HTTPS and installed by
-  Android, which rejects any APK not signed with Provito's release key. There
-  is no extra in-app hash check.
+  Android, which rejects any APK not signed with Provito's release key. The
+  in-app updater does not verify `SHA256SUMS` itself; check it manually if you
+  download an APK by hand.
 - Cleartext HTTP browsing is allowed (like Chrome) so legacy sites work; HTTPS
   is always preferred and mixed content is never allowed.
 - Unsafe-site bypass choices live in RAM only and reset when the app dies.

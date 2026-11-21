@@ -18,10 +18,16 @@ android {
         versionCode = vName.split('.').fold(0) { acc, part ->
             (acc * 100) + (part.filter { it.isDigit() }.toIntOrNull() ?: 0)
         }
-        // GeckoView ships four ABIs; keep the two that phones actually use
-        // so the APK stays installable instead of ~300 MB.
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+    }
+
+    // GeckoView is ~150 MB of native code per ABI. Ship one APK per ABI
+    // (~190 MB arm64, ~150 MB armv7) instead of a ~310 MB universal build.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
         }
     }
 
