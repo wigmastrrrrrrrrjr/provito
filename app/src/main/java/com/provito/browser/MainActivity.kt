@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         const val TABS_PAGE = "resource://android/assets/tabs.html"
         const val SETTINGS_PAGE = "resource://android/assets/settings.html"
         const val UNSAFE_PAGE = "resource://android/assets/unsafe.html"
+        const val ERROR_PAGE = "resource://android/assets/error.html"
         const val PREFS = "provito_prefs"
 
         const val KEY_WIPE_ON_EXIT = "wipe_on_exit"
@@ -103,6 +104,8 @@ class MainActivity : AppCompatActivity() {
         var lastUsed: Long = System.currentTimeMillis()
         var canBack: Boolean = false
         var canForward: Boolean = false
+        var errorPage: Boolean = false
+        var failedUrl: String? = null
         val isActive: Boolean get() = session != null
         val isOverlay: Boolean
             get() = url.startsWith(TABS_PAGE) ||
@@ -340,6 +343,83 @@ class MainActivity : AppCompatActivity() {
     private fun warningUrl(target: String, level: String): String =
         UNSAFE_PAGE + "#level=" + level + "&u=" + URLEncoder.encode(target, "UTF-8")
 
+    private fun errorUrl(failed: String, error: WebRequestError): String {
+        val (reason, hint) = errorCopy(error)
+        return ERROR_PAGE +
+            "#u=" + Uri.encode(failed) +
+            "&t=" + Uri.encode(reason) +
+            "&h=" + Uri.encode(hint) +
+            "&c=" + error.code
+    }
+
+    /** Reads a percent-encoded key from the fragment of an internal page URL. */
+    private fun hashParam(url: String, key: String): String? {
+        val fragment = url.substringAfter('#', "")
+        if (fragment.isEmpty()) return null
+        return runCatching {
+            Uri.parse("provito://x?$fragment").getQueryParameter(key)
+        }.getOrNull()
+    }
+
+    private fun errorCopy(error: WebRequestError): Pair<String, String> = when (error.code) {
+        WebRequestError.ERROR_UNKNOWN_HOST ->
+            "Cannot resolve the network IP address" to
+                "The server's address could not be looked up. Check the URL, DNS, or proxy settings."
+        WebRequestError.ERROR_OFFLINE ->
+            "You appear to be offline" to "Check your internet connection and try again."
+        WebRequestError.ERROR_NET_TIMEOUT ->
+            "The site took too long to respond" to "The server did not answer in time. Try again."
+        WebRequestError.ERROR_CONNECTION_REFUSED, WebRequestError.ERROR_PROXY_CONNECTION_REFUSED ->
+            "The connection was refused" to "The server or proxy refused the connection."
+        WebRequestError.ERROR_UNKNOWN_PROXY_HOST ->
+            "The proxy could not be found" to
+                "Check the proxy settings and make sure Orbot or your proxy is running."
+        WebRequestError.ERROR_NET_INTERRUPT, WebRequestError.ERROR_NET_RESET ->
+            "The connection was interrupted" to "The network dropped the connection. Try again."
+        WebRequestError.ERROR_SECURITY_SSL,
+        WebRequestError.ERROR_SECURITY_BAD_CERT,
+        WebRequestError.ERROR_BAD_HSTS_CERT ->
+            "The site's certificate is not trusted" to
+                "Provito blocked the connection because the certificate is invalid."
+        WebRequestError.ERROR_HTTPS_ONLY ->
+            "This site requires HTTPS" to "The site tried to downgrade to an insecure connection."
+        WebRequestError.ERROR_REDIRECT_LOOP ->
+            "Too many redirects" to "The site kept redirecting in a loop."
+        WebRequestError.ERROR_PORT_BLOCKED ->
+            "This port is blocked" to "Provito blocked a connection to a restricted port."
+        WebRequestError.ERROR_CORRUPTED_CONTENT,
+        WebRequestError.ERROR_INVALID_CONTENT_ENCODING,
+        WebRequestError.ERROR_UNSAFE_CONTENT_TYPE ->
+            "The page data is invalid" to "The server sent content Provito could not decode safely."
+        WebRequestError.ERROR_CONTENT_CRASHED ->
+            "The page crashed" to "The page's content process stopped. Try again."
+        WebRequestError.ERROR_FILE_NOT_FOUND ->
+            "File not found" to "The requested file does not exist."
+        WebRequestError.ERROR_FILE_ACCESS_DENIED ->
+            "Access denied" to "Provito is not allowed to open that file."
+        WebRequestError.ERROR_SAFEBROWSING_MALWARE_URI,
+        WebRequestError.ERROR_SAFEBROWSING_UNWANTED_URI,
+        WebRequestError.ERROR_SAFEBROWSING_HARMFUL_URI,
+        WebRequestError.ERROR_SAFEBROWSING_PHISHING_URI ->
+            "Blocked by Safe Browsing" to "This site is flagged as dangerous."
+        else -> when (error.category) {
+            WebRequestError.ERROR_CATEGORY_NETWORK ->
+                "Cannot reach the site" to "A network error stopped the page from loading."
+            WebRequestError.ERROR_CATEGORY_SECURITY ->
+                "The connection is not secure" to "Provito blocked an insecure connection."
+            WebRequestError.ERROR_CATEGORY_PROXY ->
+                "Proxy error" to "The proxy could not complete the request."
+            WebRequestError.ERROR_CATEGORY_SAFEBROWSING ->
+                "Blocked by Safe Browsing" to "This site is flagged as dangerous."
+            WebRequestError.ERROR_CATEGORY_CONTENT ->
+                "The page could not be displayed" to "The server's content could not be processed."
+            WebRequestError.ERROR_CATEGORY_URI ->
+                "That address is not valid" to "Provito could not understand the URL."
+            else ->
+                "Cannot reach the site" to "The page failed to load for an unknown reason."
+        }
+    }
+
     private fun loadTarget(tab: Tab, url: String) {
         tab.url = unsafeSites.level(url)?.let { warningUrl(url, it) } ?: url
     }
@@ -470,7 +550,7 @@ class MainActivity : AppCompatActivity() {
             session.setActive(true)
             session.setFocused(true)
         }
-        omnibox.setText(displayUrl(tab.url))
+        omnibox.setText(barUrl(tab))
         omnibox.clearFocus()
         enforceTabBudget()
         updateNavButtons()
@@ -507,7 +587,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             if (url == null) return
             tab.url = url
-            if (tab === current && !omnibox.hasFocus()) omnibox.setText(displayUrl(url))
+            if (tab === current && !omnibox.hasFocus()) omnibox.setText(barUrl(tab))
         }
 
         override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
@@ -555,6 +635,23 @@ class MainActivity : AppCompatActivity() {
                 progress.hide()
                 updateNavButtons()
             }
+            val failed = uri ?: tab.url
+            // Never feed our own pages back into the error handler.
+            if (failed.startsWith("resource://android/assets/") || failed.startsWith("provito://")) {
+                return null
+            }
+            tab.errorPage = true
+            tab.failedUrl = failed
+            val page = errorUrl(failed, error)
+            // Load the error page as a normal internal page so its
+            // provito:// buttons behave exactly like the other pages.
+            mainHandler.post {
+                if (tab.session === session) {
+                    tab.url = page
+                    if (tab === current) omnibox.setText(barUrl(tab))
+                    session.loadUri(page)
+                }
+            }
             return null
         }
     }
@@ -569,7 +666,7 @@ class MainActivity : AppCompatActivity() {
         val scheme = uri.scheme?.lowercase().orEmpty()
 
         if (scheme == "provito") {
-            handleProvitoAction(tab, uri)
+            handleProvitoAction(tab, uri, request.triggerUri ?: tab.url)
             return GeckoResult.deny()
         }
 
@@ -617,8 +714,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleProvitoAction(tab: Tab, uri: Uri) {
-        val here = tab.url
+    private fun handleProvitoAction(tab: Tab, uri: Uri, here: String) {
         when (uri.host) {
             "unsafe-continue" -> {
                 if (!here.startsWith(UNSAFE_PAGE)) return
@@ -627,11 +723,23 @@ class MainActivity : AppCompatActivity() {
                 tab.url = target
                 tab.session?.loadUri(target)
             }
+            "retry" -> {
+                if (!here.startsWith(ERROR_PAGE) && !tab.errorPage) return
+                val target = uri.getQueryParameter("u") ?: return
+                tab.errorPage = false
+                tab.failedUrl = null
+                tab.url = target
+                tab.session?.loadUri(target)
+            }
             "home" -> {
                 if (!here.startsWith(UNSAFE_PAGE) &&
                     !here.startsWith(SETTINGS_PAGE) &&
-                    !here.startsWith(TABS_PAGE)
+                    !here.startsWith(TABS_PAGE) &&
+                    !here.startsWith(ERROR_PAGE) &&
+                    !tab.errorPage
                 ) return
+                tab.errorPage = false
+                tab.failedUrl = null
                 loadInTab(tab, HOME_URL)
             }
             "set" -> {
@@ -703,6 +811,10 @@ class MainActivity : AppCompatActivity() {
         GeckoSession.ProgressDelegate {
 
         override fun onPageStart(session: GeckoSession, url: String) {
+            if (!url.startsWith(ERROR_PAGE)) {
+                tab.errorPage = false
+                tab.failedUrl = null
+            }
             if (tab === current) {
                 progress.show()
                 progress.setIndeterminate(true)
@@ -905,11 +1017,23 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- UI wiring ----------
 
+    /** What the address bar should show for a tab. */
+    private fun barUrl(tab: Tab): String {
+        val failed = tab.failedUrl
+        return if (tab.errorPage && failed != null) failed else displayUrl(tab.url)
+    }
+
     private fun displayUrl(url: String): String = when {
         url.startsWith(HOME_URL) -> ""
         url.startsWith(TABS_PAGE) -> "provito://tabs"
         url.startsWith(SETTINGS_PAGE) -> "provito://settings"
         url.startsWith(UNSAFE_PAGE) -> "Blocked site"
+        url.startsWith(ERROR_PAGE) -> {
+            val failed = hashParam(url, "u").orEmpty()
+            if (failed.startsWith("resource://android/assets/")) "" else failed
+        }
+        // Never expose GeckoView's internal asset scheme in the UI.
+        url.startsWith("resource://android/assets/") -> ""
         else -> url
     }
 
@@ -917,6 +1041,7 @@ class MainActivity : AppCompatActivity() {
         tab.url.startsWith(TABS_PAGE) -> "Tabs"
         tab.url.startsWith(SETTINGS_PAGE) -> "Settings"
         tab.url.startsWith(UNSAFE_PAGE) -> "Blocked site"
+        tab.url.startsWith(ERROR_PAGE) -> "Problem loading page"
         else -> tab.title.ifBlank { "New tab" }
     }
 
@@ -933,7 +1058,16 @@ class MainActivity : AppCompatActivity() {
             if (tab.isOverlay) newTab(HOME_URL) else loadInTab(tab, HOME_URL)
         }
         findViewById<ImageButton>(R.id.btnRefresh).setOnClickListener {
-            current?.session?.reload()
+            val tab = current ?: return@setOnClickListener
+            val failed = tab.failedUrl
+            if (tab.errorPage && failed != null) {
+                tab.errorPage = false
+                tab.failedUrl = null
+                tab.url = failed
+                tab.session?.loadUri(failed)
+            } else {
+                tab.session?.reload()
+            }
         }
         findViewById<ImageButton>(R.id.btnTabs).setOnClickListener { openTabsPage() }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener {
@@ -969,7 +1103,7 @@ class MainActivity : AppCompatActivity() {
                 val item = org.json.JSONObject()
                 item.put("id", index)
                 item.put("title", displayTitle(tab))
-                item.put("url", displayUrl(tab.url))
+                item.put("url", barUrl(tab))
                 item.put("unloaded", tab.session == null)
                 item.put("current", tab === current)
                 array.put(item)
@@ -1015,7 +1149,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun wireOmnibox() {
         omnibox.setOnFocusChangeListener { _, focused ->
-            if (!focused) current?.let { omnibox.setText(displayUrl(it.url)) }
+            if (!focused) current?.let { omnibox.setText(barUrl(it)) }
             else omnibox.post { omnibox.selectAll() }
         }
         omnibox.setOnEditorActionListener { _, actionId, _ ->
