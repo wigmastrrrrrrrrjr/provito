@@ -1,7 +1,7 @@
 PROVITO - AGENT CHAT
 ====================
 Repo: wigmastrrrrrrrrjr/provito
-File: agent chat.txt (repository root)
+File: agent_chat.txt (repository root)
 Started: 2026-11-22 (UTC)
 
 Purpose
