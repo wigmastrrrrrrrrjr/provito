@@ -6,7 +6,7 @@
     android:orientation="vertical"
     android:background="?android:attr/colorBackground">
 
-    <!-- Top browser bar: tab switcher, nav, omnibox, overflow menu (Chrome-like) -->
+    <!-- Top browser bar: tabs + new tab, nav, omnibox, overflow menu (Chrome-like) -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
@@ -21,10 +21,19 @@
             android:id="@+id/btnTabs"
             android:layout_width="36dp"
             android:layout_height="36dp"
-            android:layout_marginEnd="4dp"
+            android:layout_marginEnd="2dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Tabs"
+            android:contentDescription="@string/tab_switcher"
             android:src="@drawable/ic_tabs" />
+
+        <ImageButton
+            android:id="@+id/btnPlus"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginEnd="8dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/new_tab"
+            android:src="@drawable/ic_plus" />
 
         <ImageButton
             android:id="@+id/btnBack"
@@ -32,16 +41,16 @@
             android:layout_height="36dp"
             android:layout_marginEnd="2dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Back"
+            android:contentDescription="@string/nav_back"
             android:src="@drawable/ic_back" />
 
         <ImageButton
             android:id="@+id/btnForward"
             android:layout_width="36dp"
             android:layout_height="36dp"
-            android:layout_marginEnd="8dp"
+            android:layout_marginEnd="2dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Forward"
+            android:contentDescription="@string/nav_forward"
             android:src="@drawable/ic_forward" />
 
         <ImageButton
@@ -50,7 +59,7 @@
             android:layout_height="36dp"
             android:layout_marginEnd="8dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Refresh"
+            android:contentDescription="@string/nav_refresh"
             android:src="@drawable/ic_refresh" />
 
         <EditText
@@ -82,7 +91,7 @@
             android:layout_height="36dp"
             android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Menu"
+            android:contentDescription="@string/menu_overflow"
             android:src="@drawable/ic_menu" />
     </LinearLayout>
 
@@ -116,7 +125,7 @@
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Home"
+            android:contentDescription="@string/nav_home"
             android:src="@drawable/ic_home" />
 
         <View
