@@ -1,5 +1,11 @@
 <resources>
     <string name="app_name">Provito</string>
-    <string name="omnibox_hint">Search privately with Brave</string>
+    <string name="omnibox_hint">Search or type a URL</string>
     <string name="blocked_description">Trackers and ads blocked</string>
+    <string name="tab_switcher">Tab switcher</string>
+    <string name="nav_back">Back</string>
+    <string name="nav_forward">Forward</string>
+    <string name="nav_refresh">Refresh</string>
+    <string name="nav_home">Home</string>
+    <string name="menu_overflow">Menu</string>
 </resources>

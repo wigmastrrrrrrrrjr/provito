@@ -6,35 +6,37 @@
 <title>Provito - Settings</title>
 <style>
   :root {
-    --bg: #14141f;
-    --card: #1e1e2e;
-    --accent: #8e7bff;
-    --text: #eceaf8;
-    --muted: #8f8ca6;
-    --border: #2c2c45;
+    --bg: #ffffff;
+    --card: #ffffff;
+    --accent: #1a73e8;
+    --text: #202124;
+    --muted: #5f6368;
+    --border: #dadce0;
+    --divider: #e8eaed;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   body {
-    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     background: var(--bg);
     color: var(--text);
-    padding: 20px 16px 60px;
+    padding: 16px 16px 80px;
     max-width: 640px;
     margin: 0 auto;
   }
-  h1 { font-size: 1.15rem; margin-bottom: 2px; }
+  h1 { font-size: 1.25rem; font-weight: 500; margin-bottom: 2px; }
   .sub { color: var(--muted); font-size: .72rem; margin-bottom: 20px; }
   .section-title {
-    color: var(--accent);
-    font-size: .68rem;
+    color: var(--muted);
+    font-size: .65rem;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 1px;
-    margin: 22px 0 8px;
+    letter-spacing: 0.5px;
+    margin: 24px 0 12px;
   }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 14px;
+    border-radius: 12px;
     overflow: hidden;
   }
   .row {
@@ -42,12 +44,12 @@
     align-items: center;
     gap: 12px;
     padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--divider);
   }
   .row:last-child { border-bottom: none; }
   .row .info { flex: 1; min-width: 0; }
-  .row .name { font-size: .9rem; font-weight: 600; }
-  .row .desc { color: var(--muted); font-size: .68rem; margin-top: 2px; line-height: 1.35; }
+  .row .name { font-size: .9rem; font-weight: 500; }
+  .row .desc { color: var(--muted); font-size: .72rem; margin-top: 2px; line-height: 1.4; }
   .switch {
     position: relative;
     width: 44px;
@@ -58,7 +60,7 @@
   .switch .track {
     position: absolute;
     inset: 0;
-    background: #33334d;
+    background: #dadce0;
     border-radius: 13px;
     transition: background .2s;
     cursor: pointer;
@@ -71,13 +73,13 @@
     width: 20px;
     height: 20px;
     border-radius: 50%;
-    background: #cfcbe6;
+    background: #ffffff;
     transition: transform .2s, background .2s;
   }
   .switch input:checked + .track { background: var(--accent); }
-  .switch input:checked + .track::after { transform: translateX(18px); background: #17122e; }
+  .switch input:checked + .track::after { transform: translateX(18px); background: #ffffff; }
   select {
-    background: #26263f;
+    background: #ffffff;
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -90,14 +92,14 @@
     background: transparent;
     color: var(--text);
     border: none;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--divider);
     padding: 14px 16px;
     font-size: .9rem;
     text-align: left;
     cursor: pointer;
   }
   button.action:last-child { border-bottom: none; }
-  button.action:active { background: #26263f; }
+  button.action:active { background: #f1f3f4; }
   .about {
     margin-top: 26px;
     color: var(--muted);
@@ -106,7 +108,7 @@
     text-align: center;
   }
   @media (min-width: 720px) {
-    body { padding: 48px 32px 80px; max-width: 720px; }
+    body { padding: 40px 32px 80px; max-width: 720px; }
     h1 { font-size: 1.5rem; }
     .sub { font-size: .85rem; }
     .row { padding: 18px 22px; }
@@ -149,14 +151,14 @@
     <div class="row">
       <div class="info">
         <div class="name">Wipe data on exit</div>
-        <div class="desc">Clears cookies and caches when you leave the app. Logins are kept while you stay.</div>
+        <div class="desc">Clears cookies and caches when you leave the app.</div>
       </div>
       <label class="switch"><input type="checkbox" data-key="wipe_on_exit" checked><span class="track"></span></label>
     </div>
     <div class="row">
       <div class="info">
         <div class="name" id="onion_name">Onion mode (route via Tor)</div>
-        <div class="desc" id="onion_desc">Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app. Sites see a Tor exit IP, never yours.</div>
+        <div class="desc" id="onion_desc">Hides your IP from every site by routing traffic over the free, open-source Tor network through the Orbot app.</div>
       </div>
       <label class="switch"><input type="checkbox" data-key="onion_mode"><span class="track"></span></label>
     </div>
@@ -173,14 +175,14 @@
     <div class="row">
       <div class="info">
         <div class="name">Unload inactive tabs</div>
-        <div class="desc">Keeps total tab memory around 1 GB. Older tabs go to standby (url + title kept) and reopen instantly when tapped. Turn off to keep every tab fully loaded.</div>
+        <div class="desc">Keeps total tab memory around 1 GB. Older tabs go to standby and reopen instantly when tapped.</div>
       </div>
       <label class="switch"><input type="checkbox" data-key="unload_tabs" checked><span class="track"></span></label>
     </div>
     <div class="row">
       <div class="info">
         <div class="name">Auto UI resize</div>
-        <div class="desc">Detects your screen size and scales the interface to fit - bigger bars and touch targets on tablets and foldables, standard size on phones.</div>
+        <div class="desc">Detects your screen size and scales the interface to fit - bigger bars and touch targets on tablets and foldables.</div>
       </div>
       <label class="switch"><input type="checkbox" data-key="auto_ui_resize" checked><span class="track"></span></label>
     </div>
@@ -207,7 +209,7 @@
   <div class="about">
     Provito v<span id="ver"></span><br>
     Blocked this session: <span id="blocked">0</span><br>
-    Engine: GeckoView 140 (Firefox). No accounts. No history. No telemetry. Honestly vibecoded.
+    Engine: GeckoView 140 (Firefox). No accounts. No history. No telemetry.
   </div>
 
 <script>
@@ -221,8 +223,6 @@ function flag(k, d) {
   var v = q(k, d);
   return v === '1' || v === 'true';
 }
-// Provito intercepts provito:// navigations and denies them, so the
-// current page never actually unloads - this is the JS->native channel.
 function act(url) {
   location.href = url;
 }
