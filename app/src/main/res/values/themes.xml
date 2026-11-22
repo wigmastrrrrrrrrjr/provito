@@ -12,7 +12,7 @@
         <item name="colorOnSurface">#202124</item>
         <item name="colorOnSurfaceVariant">#5F6368</item>
         <item name="android:colorBackground">#FFFFFF</item>
-        <item name="android:colorOnBackground">#202124</item>
+        <item name="colorOnBackground">#202124</item>
         <item name="colorControlNormal">#5F6368</item>
     </style>
 </resources>
