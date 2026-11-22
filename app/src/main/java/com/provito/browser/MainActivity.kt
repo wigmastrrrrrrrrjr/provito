@@ -131,6 +131,7 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Responsive UI ----------
     private var uiScale = 1f
+    private var compactChrome = false
     private var insetTop = 0
     private var insetBottom = 0
     private var insetLeft = 0
@@ -178,8 +179,8 @@ class MainActivity : AppCompatActivity() {
             // TextureView composites like a normal view, so the splash,
             // setup wizard and dialogs render correctly above the page.
             setViewBackend(GeckoView.BACKEND_TEXTURE_VIEW)
-            setBackgroundColor(Color.parseColor("#14141F"))
-            coverUntilFirstPaint(Color.parseColor("#14141F"))
+            setBackgroundColor(Color.WHITE)
+            coverUntilFirstPaint(Color.WHITE)
         }
         webContainer.addView(geckoView)
 
@@ -262,6 +263,9 @@ class MainActivity : AppCompatActivity() {
             smallest >= 600f -> 1.2f
             else -> 1f
         }
+        // Phones cannot fit every top-bar control next to a usable
+        // omnibox, so secondary navigation moves into the overflow menu.
+        compactChrome = widthDp < 600f
         layoutShell()
     }
 
@@ -272,17 +276,32 @@ class MainActivity : AppCompatActivity() {
         val topBar = findViewById<LinearLayout>(R.id.topBar)
         val bottomBar = findViewById<LinearLayout>(R.id.bottomBar)
         val btnShield = findViewById<ImageButton>(R.id.btnShield)
+        val btnTabs = findViewById<ImageButton>(R.id.btnTabs)
+        val btnPlus = findViewById<ImageButton>(R.id.btnPlus)
+        val btnBack = findViewById<ImageButton>(R.id.btnBack)
+        val btnForward = findViewById<ImageButton>(R.id.btnForward)
+        val btnRefresh = findViewById<ImageButton>(R.id.btnRefresh)
         val btnGo = findViewById<ImageButton>(R.id.btnGo)
+        val btnMenu = findViewById<ImageButton>(R.id.btnMenu)
 
         topBar.layoutParams.height = px(56f) + insetTop
         topBar.setPadding(px(8f) + insetLeft, insetTop, px(8f) + insetRight, 0)
 
-        btnShield.layoutParams.width = px(36f)
-        btnShield.layoutParams.height = px(36f)
-        btnGo.layoutParams.width = px(36f)
-        btnGo.layoutParams.height = px(36f)
+        btnForward.visibility = if (compactChrome) View.GONE else View.VISIBLE
+        btnRefresh.visibility = if (compactChrome) View.GONE else View.VISIBLE
+        btnGo.visibility = if (compactChrome) View.GONE else View.VISIBLE
 
-        omnibox.layoutParams.height = px(42f)
+        val buttonSize = px(36f)
+        listOf(btnTabs, btnPlus, btnBack, btnForward, btnRefresh, btnGo, btnMenu)
+            .forEach {
+                it.layoutParams.width = buttonSize
+                it.layoutParams.height = buttonSize
+            }
+
+        btnShield.layoutParams.width = px(32f)
+        btnShield.layoutParams.height = px(32f)
+
+        omnibox.layoutParams.height = px(40f)
         omnibox.textSize = 14f * uiScale
         txtBlocked.textSize = 11f * uiScale
         txtBlocked.minWidth = px(34f)
@@ -1057,21 +1076,33 @@ class MainActivity : AppCompatActivity() {
             val tab = current ?: return@setOnClickListener
             if (tab.isOverlay) newTab(HOME_URL) else loadInTab(tab, HOME_URL)
         }
-        findViewById<ImageButton>(R.id.btnRefresh).setOnClickListener {
-            val tab = current ?: return@setOnClickListener
-            val failed = tab.failedUrl
-            if (tab.errorPage && failed != null) {
-                tab.errorPage = false
-                tab.failedUrl = null
-                tab.url = failed
-                tab.session?.loadUri(failed)
-            } else {
-                tab.session?.reload()
-            }
-        }
+        findViewById<ImageButton>(R.id.btnRefresh).setOnClickListener { reloadCurrent() }
         findViewById<ImageButton>(R.id.btnTabs).setOnClickListener { openTabsPage() }
+        findViewById<ImageButton>(R.id.btnPlus).setOnClickListener {
+            val overlay = current
+            newTab(HOME_URL)
+            if (overlay != null && overlay.isOverlay) closeTab(overlay)
+            omnibox.requestFocus()
+            omnibox.post { showKeyboard() }
+        }
+        findViewById<LinearLayout>(R.id.shieldChip).setOnClickListener {
+            showPrivacyStats()
+        }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener {
             showMenu(it as ImageButton)
+        }
+    }
+
+    private fun reloadCurrent() {
+        val tab = current ?: return
+        val failed = tab.failedUrl
+        if (tab.errorPage && failed != null) {
+            tab.errorPage = false
+            tab.failedUrl = null
+            tab.url = failed
+            tab.session?.loadUri(failed)
+        } else {
+            tab.session?.reload()
         }
     }
 
@@ -1201,6 +1232,11 @@ class MainActivity : AppCompatActivity() {
     private fun hideKeyboard() {
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         imm.hideSoftInputFromWindow(omnibox.windowToken, 0)
+    }
+
+    private fun showKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showSoftInput(omnibox, InputMethodManager.SHOW_IMPLICIT)
     }
 
     // ---------- Settings and tabs page actions ----------
@@ -1344,6 +1380,7 @@ class MainActivity : AppCompatActivity() {
         menu.menu.findItem(R.id.action_wipe_on_exit).isChecked =
             prefs.getBoolean(KEY_WIPE_ON_EXIT, true)
         menu.menu.findItem(R.id.action_auto_update_check).isChecked = Updater.isEnabled(this)
+        menu.menu.findItem(R.id.action_forward).isEnabled = current?.canForward == true
 
         menu.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -1353,6 +1390,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 R.id.action_close_tab -> {
                     current?.let { closeTab(it) }
+                    true
+                }
+                R.id.action_forward -> {
+                    current?.session?.goForward()
+                    true
+                }
+                R.id.action_refresh -> {
+                    reloadCurrent()
                     true
                 }
                 R.id.action_settings -> {

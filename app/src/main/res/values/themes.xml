@@ -2,6 +2,17 @@
     <style name="Theme.Provito" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryContainer">#E8F0FE</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorSurfaceVariant">#F1F3F4</item>
+        <item name="colorOnSurface">#202124</item>
+        <item name="colorOnSurfaceVariant">#5F6368</item>
+        <item name="android:colorBackground">#FFFFFF</item>
+        <item name="colorOnBackground">#202124</item>
+        <item name="colorControlNormal">#5F6368</item>
     </style>
 </resources>

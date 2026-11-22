@@ -6,44 +6,51 @@
 <title>Problem loading page</title>
 <style>
   :root {
-    --bg: #14141f;
-    --card: #1e1e2e;
-    --line: #2e2e44;
-    --purple: #8e7bff;
-    --text: #f3f0ff;
-    --muted: #a09ab8;
-    --red: #ff6b6b;
+    --bg: #ffffff;
+    --card: #f1f3f4;
+    --line: #dadce0;
+    --accent: #1a73e8;
+    --text: #202124;
+    --muted: #5f6368;
+    --red: #d93025;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   body {
-    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: radial-gradient(1100px 560px at 50% -10%, #221f38 0%, var(--bg) 62%);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    background: var(--bg);
     color: var(--text);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 28px 22px;
+    padding: 24px 20px;
     text-align: center;
   }
-  .face {
-    width: 78px;
-    height: 78px;
+  .icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 26px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     margin-bottom: 20px;
   }
-  .face .ring { fill: none; stroke: var(--purple); stroke-width: 4; opacity: .85; }
-  .face .eye { fill: var(--purple); }
-  .face .mouth { fill: none; stroke: var(--purple); stroke-width: 4.5; stroke-linecap: round; }
   h1 {
-    font-size: 1.24rem;
+    font-size: 1.25rem;
+    font-weight: 500;
     line-height: 1.35;
     margin-bottom: 12px;
     max-width: 460px;
   }
   .reason {
     font-size: 1rem;
-    font-weight: 700;
+    font-weight: 500;
     color: var(--red);
     margin-bottom: 10px;
     max-width: 460px;
@@ -58,9 +65,9 @@
   .url {
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 10px;
     padding: 11px 15px;
-    font-size: .74rem;
+    font-size: .75rem;
     color: var(--muted);
     word-break: break-all;
     max-width: 460px;
@@ -72,7 +79,7 @@
     font-size: .68rem;
     color: var(--muted);
     opacity: .7;
-    margin-bottom: 26px;
+    margin-bottom: 24px;
   }
   .code:empty { display: none; }
   button {
@@ -80,32 +87,27 @@
     width: 100%;
     max-width: 340px;
     border: none;
-    border-radius: 28px;
-    padding: 14px 20px;
+    border-radius: 10px;
+    padding: 12px 16px;
     font-size: .95rem;
-    font-weight: 700;
-    margin-bottom: 12px;
+    font-weight: 500;
+    margin-bottom: 10px;
     cursor: pointer;
     transition: transform .12s, opacity .2s;
   }
   button:active { transform: scale(.97); }
-  .primary { background: var(--purple); color: #14141f; }
+  .primary { background: var(--accent); color: #ffffff; }
   .soft {
     background: transparent;
-    color: var(--purple);
+    color: var(--accent);
     border: 1px solid var(--line);
-    font-weight: 600;
+    font-weight: 500;
   }
 </style>
 </head>
 <body>
-  <svg class="face" viewBox="0 0 100 100" aria-hidden="true">
-    <circle class="ring" cx="50" cy="50" r="42"></circle>
-    <circle class="eye" cx="37" cy="42" r="4.6"></circle>
-    <circle class="eye" cx="63" cy="42" r="4.6"></circle>
-    <path class="mouth" d="M34 67 Q50 55 66 67"></path>
-  </svg>
-  <h1>Looks like this page doesn't work</h1>
+  <div class="icon">!</div>
+  <h1>Hmm, we couldn&rsquo;t find that page</h1>
   <div class="reason" id="reason"></div>
   <div class="hint" id="hint"></div>
   <div class="url" id="target"></div>
