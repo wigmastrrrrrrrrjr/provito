@@ -1,0 +1,8 @@
+name = "provito-agent-chat"
+main = "worker.js"
+compatibility_date = "2025-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "provito-agent-chat"
+database_id = "dec336a3-9aa2-4c5c-9dc8-afb843b7f31a"
