@@ -1,0 +1,122 @@
+PROVITO - AGENT CHAT
+====================
+Repo: wigmastrrrrrrrrjr/provito
+File: agent chat.txt (repository root)
+Started: 2026-11-22 (UTC)
+
+Purpose
+-------
+Coordination log between the two agents working on Provito:
+
+  [backend]   engine, native code, build/release pipeline, security
+  [frontend]  HTML pages, markup, styling, user-facing copy
+
+Rules
+-----
+1. Append new messages at the BOTTOM. Do not rewrite or delete other entries.
+2. Start every message with: [role] YYYY-MM-DD - subject
+3. One topic per message. Cite files, commits, tags and versions.
+4. The provito:// contract and the fragment formats below are SHARED. Post
+   here before changing them and wait for an ack.
+5. Only [backend] creates release tags (v*). Frontend changes ship in the next
+   tag once backend has built and verified them.
+6. Never commit secrets, keystores or tokens.
+7. Keep this file plain text.
+
+Ownership
+---------
+[backend]
+  app/src/main/java/**
+  app/src/main/AndroidManifest.xml
+  app/src/main/res/** (native layouts, menus, drawables)
+  app/build.gradle.kts, build.gradle.kts, settings.gradle.kts
+  .github/workflows/**
+  README.md (release/security sections)
+
+[frontend]
+  app/src/main/assets/home.html
+  app/src/main/assets/settings.html
+  app/src/main/assets/tabs.html
+  app/src/main/assets/unsafe.html
+  app/src/main/assets/error.html
+  (and any new asset pages)
+
+Shared, must coordinate
+  provito:// actions, fragment parameter names, asset filenames, and any copy
+  that native code depends on (e.g. the title "Problem loading page").
+
+Current state (v2.0.3)
+----------------------
+- Engine: GeckoView 140 (Firefox ESR). Every tab is a private GeckoSession.
+- Internal pages load from resource://android/assets/<file>.html
+  (NOT file:///android_asset/ - that is a WebView-only path and 404s here).
+- Custom network error page: assets/error.html.
+- resource:// URLs are masked in the address bar, tab switcher and titles.
+- Releases: one APK per ABI (arm64-v8a, armeabi-v7a) plus SHA256SUMS.
+
+Contract: pages -> native
+-------------------------
+Pages send actions as top-level navigations:
+  location.href = 'provito://...'
+Native intercepts the navigation, handles the action and denies the load, so
+the page stays where it is. Do not use iframes or a JS bridge.
+
+Origin-gated actions (sender must be the matching internal page):
+  from settings.html:
+    provito://set?k=<key>&v=<value>
+    provito://act?name=<action>
+  from tabs.html:
+    provito://tab?op=select&id=<n>
+    provito://tab?op=close&id=<n>
+    provito://tab?op=new
+  from unsafe.html:
+    provito://unsafe-continue?u=<encoded url>
+  from error.html:
+    provito://retry?u=<encoded url>
+  from settings/tabs/unsafe/error:
+    provito://home
+
+Settings keys (provito://set?k=...&v=...):
+  search_engine          brave | duckduckgo | mojeek
+  block_ads              0 | 1
+  unload_tabs            0 | 1
+  auto_ui_resize         0 | 1
+  wipe_on_exit           0 | 1
+  update_check_enabled   0 | 1
+  onion_mode             0 | 1
+
+Settings actions (provito://act?name=...):
+  orbot-install, orbot-status, check-updates, unsafe-update, wipe
+
+Page data injected via URL fragment
+-----------------------------------
+settings.html#v=<ver>&search=<engine>&block=<0|1>&wipe=<0|1>&unload=<0|1>
+              &resize=<0|1>&onion=<0|1>&updchk=<0|1>&blocked=<n>&orbot=<0|1>
+tabs.html#data=<url-encoded JSON array of {id,title,url,unloaded,current}>
+unsafe.html#level=<malware|phishing>&u=<encoded url>
+error.html#u=<encoded url>&t=<reason>&h=<hint>&c=<error code>
+
+Parsing notes:
+  - Values are percent-encoded. URLSearchParams(location.hash.slice(1)) works.
+  - tabs.html JSON is URL-encoded; decode it before JSON.parse. Spaces may
+    arrive as "+" (URLEncoder); replace "+" with "%20" before decoding.
+  - Keep every page self-contained: inline CSS/JS, no external files.
+
+Messages
+--------
+[backend] 2026-11-22 - handoff / current backend state
+  - Engine swapped from system WebView to GeckoView 140 (v2.0.0).
+  - Fixed internal pages: use resource://android/assets/<file>.html, never
+    file:///android_asset/<file>.html (Gecko returns file-not-found).
+  - Added assets/error.html plus native error routing: any main-frame failure
+    now shows that page with a sad face, reason, hint, failed URL, error code,
+    and Try again / Go home. Refresh also retries the failed URL.
+  - Masked resource:// URLs in the omnibox, tab switcher and tab titles.
+  - Release pipeline verifies each APK (unzip -t, apksigner), publishes
+    SHA256SUMS, and re-downloads assets to confirm the checksums.
+  - Frontend requests:
+      * review error.html copy/layout for consistency with the other pages
+      * confirm settings.html and tabs.html never display resource:// URLs
+      * post here before renaming an asset file or fragment parameter
+
+[frontend] (add your first message below)
